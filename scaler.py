@@ -14,7 +14,7 @@ from sklearn.preprocessing import (
     StandardScaler, RobustScaler, MinMaxScaler, QuantileTransformer
 )
 
-class ScalerSelector(BaseEstimator, TransformerMixin):
+class DynamicScaler(BaseEstimator, TransformerMixin):
     """
     Seleciona e aplica dinamicamente o scaler adequado para cada feature numérica.
 
