@@ -52,7 +52,6 @@ selector.plot_histograms(df, df_scaled, features=['idade', 'salario'])
 
 | Método                                                             | Descrição                                                                                          |
 |--------------------------------------------------------------------|----------------------------------------------------------------------------------------------------|
-| `__init__(strategy, shapiro_p_val, serialize, save_path, random_state, logger)` | Inicializa o Seletor de Scaladores.                                                                |
 | `fit(X, y=None)`                                                   | Ajusta cada scaler conforme a estratégia selecionada e preenche o relatório interno.               |
 | `transform(X, return_df=False)`                                    | Aplica os scalers ajustados aos dados; retorna `DataFrame` se `return_df=True`, caso contrário `ndarray`. |
 | `inverse_transform(X, return_df=False)`                            | Reverte o escalonamento aplicando o método inverso de cada scaler.                                 |
