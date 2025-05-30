@@ -1,4 +1,4 @@
-# 📊 AutoScaler
+# 📊 DynamicScaler
 
 Selecione e aplique dinamicamente o scaler mais adequado para cada feature numérica, com base em testes de normalidade (Shapiro), assimetria e detecção de outliers.
 
