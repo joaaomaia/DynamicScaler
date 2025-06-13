@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import logging
 import pathlib
+import hashlib
 import joblib
 import numpy as np
 import pandas as pd
@@ -8,6 +9,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
 from scipy.stats import shapiro, skew, kurtosis
+import sklearn
+from sklearn.utils.validation import check_is_fitted
+from typing import Callable
 
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.preprocessing import (
@@ -44,33 +48,39 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
     # ------------------------------------------------------------------
     def __init__(self,
                  strategy: str = 'auto',
-                 shapiro_p_val: float = 0.01, # se aumentar fica mais restritiva a escolha de StandardScaler()
+                 shapiro_p_val: float = 0.01,
                  serialize: bool = False,
                  save_path: str | pathlib.Path | None = None,
                  random_state: int = 0,
+                 missing_strategy: str = 'none',
+                 plot_backend: str = 'matplotlib',
                  logger: logging.Logger | None = None):
         self.strategy = strategy.lower() if strategy else None
         self.serialize = serialize
         self.save_path = pathlib.Path(save_path or "scalers.pkl")
         self.shapiro_p_val = shapiro_p_val
         self.random_state = random_state
+        self.missing_strategy = missing_strategy
+        self.plot_backend = plot_backend
 
-        self.scalers_: dict[str, BaseEstimator] = {}
+        self.scalers_: dict[str, BaseEstimator] | None = None
         self.report_:  dict[str, dict] = {}      # estatísticas por coluna
 
         # logger
         if logger:
             self.logger = logger
         else:
-            self.logger = logging.getLogger(self.__class__.__name__)
+            self.logger = logging.getLogger(__name__)
             if not self.logger.handlers:
                 logging.basicConfig(level=logging.INFO,
                                     format="%(levelname)s: %(message)s")
 
+        self.tags_ = {"allow_nan": True}
+
     # ------------------------------------------------------------------
     # MÉTODO INTERNO PARA ESTRATÉGIA AUTO
     # ------------------------------------------------------------------
-    def _choose_auto(self, x: pd.Series):
+    def _choose_auto(self, x: pd.Series, *, stats_callback: Callable | None = None):
         """
         Decide qual scaler empregar (ou nenhum) para a série x.
 
@@ -129,22 +139,30 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
 
         stats = dict(p_value=p_val, skew=sk, kurtosis=kt,
                      reason=reason, scaler=scaler.__class__.__name__)
+        if stats_callback is not None:
+            stats_callback(x.name, stats)
         return scaler, stats
 
     # ------------------------------------------------------------------
     # API FIT
     # ------------------------------------------------------------------
-    def fit(self, X, y=None):
+    def fit(self, X, y=None, *, stats_callback: Callable | None = None):
         X_df = pd.DataFrame(X)
+        num_df = X_df.select_dtypes("number")
+        non_numeric = set(X_df.columns) - set(num_df.columns)
+        if non_numeric:
+            self.logger.warning("Ignoring non-numeric columns: %s", list(non_numeric))
+        X_df = num_df
 
         if self.strategy not in {'auto', 'standard', 'robust',
                                  'minmax', 'quantile', None}:
             raise ValueError(f"strategy '{self.strategy}' não suportada.")
 
+        self.scalers_ = {}
         for col in X_df.columns:
             # --- seleção do scaler -----------------------------------
             if self.strategy == 'auto':
-                scaler, stats = self._choose_auto(X_df[col])
+                scaler, stats = self._choose_auto(X_df[col], stats_callback=stats_callback)
             elif self.strategy == 'standard':
                 scaler = StandardScaler()
                 stats  = dict(reason='global-standard', scaler='StandardScaler')
@@ -161,6 +179,18 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
             else:              # None
                 scaler = None
                 stats  = dict(reason='passthrough', scaler='None')
+
+            # --- tratamento de missing values -----------------------
+            fill_value = None
+            if self.missing_strategy == 'median':
+                fill_value = X_df[col].median()
+            elif self.missing_strategy == 'mean':
+                fill_value = X_df[col].mean()
+            elif self.missing_strategy == 'constant':
+                fill_value = 0
+            if fill_value is not None:
+                X_df[col] = X_df[col].fillna(fill_value)
+                stats['fill_value'] = fill_value
 
             # --- ajuste ---------------------------------------------
             if scaler is not None:
@@ -179,6 +209,10 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
                 stats['reason']
             )
 
+        self.feature_names_in_ = np.array(list(self.scalers_.keys()))
+        self.n_features_in_ = len(self.feature_names_in_)
+        self.columns_hash_ = hashlib.md5(",".join(self.scalers_).encode()).hexdigest()
+
         # serialização opcional
         if self.serialize:
             self.save(self.save_path)
@@ -186,33 +220,83 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         return self
 
     # ------------------------------------------------------------------
+    # PARTIAL FIT
+    # ------------------------------------------------------------------
+    def partial_fit(self, X, y=None):
+        X_df = pd.DataFrame(X)
+        if not getattr(self, 'scalers_', None):
+            return self.fit(X_df)
+
+        for col, scaler in self.scalers_.items():
+            if col not in X_df.columns:
+                self.logger.warning("Column '%s' missing in partial_fit input; skipping", col)
+                continue
+            if scaler is not None and hasattr(scaler, 'partial_fit'):
+                scaler.partial_fit(X_df[[col]])
+            else:
+                self.logger.info("Column '%s' scaler does not support partial_fit", col)
+        return self
+
+    # ------------------------------------------------------------------
     # TRANSFORM / INVERSE_TRANSFORM
     # ------------------------------------------------------------------
-    def transform(self, X, return_df: bool = False):
+    def transform(self, X, *, return_df: bool = False, strict: bool = False,
+                  keep_other_cols: bool = True, log_level: str = "full"):
+        check_is_fitted(self, "feature_names_in_")
         X_df = pd.DataFrame(X).copy()
 
-        # Verifica se todas as colunas esperadas estão presentes
         missing = set(self.scalers_) - set(X_df.columns)
-        if missing:
-            raise ValueError(f"Colunas ausentes no transform: {missing}")
+        if missing and strict:
+            raise ValueError(f"Missing columns during transform: {missing}")
 
         for col, scaler in self.scalers_.items():
-            if scaler is not None:
-                X_df[col] = scaler.transform(X_df[[col]])
+            if col in X_df.columns and scaler is not None:
+                data_col = X_df[[col]].copy()
+                fill = self.report_[col].get('fill_value') if self.missing_strategy != 'none' else None
+                if fill is not None:
+                    data_col[col] = data_col[col].fillna(fill)
+                X_df[col] = scaler.transform(data_col)
 
-        return X_df if return_df else X_df.values
+        if log_level == "full":
+            untouched = set(X_df.columns) - set(self.scalers_)
+            if untouched:
+                self.logger.info("Untouched columns preserved: %s", list(untouched))
 
-    def inverse_transform(self, X, return_df: bool = False):
-        X_df = pd.DataFrame(X, columns=self.scalers_.keys()).copy()
+        if keep_other_cols:
+            return X_df if return_df else X_df.values
+        else:
+            X_scaled_only = X_df[list(self.scalers_)]
+            return X_scaled_only if return_df else X_scaled_only.values
+
+    def inverse_transform(self, X, *, return_df: bool = False, strict: bool = False,
+                           keep_other_cols: bool = True, log_level: str = "full"):
+        check_is_fitted(self, "feature_names_in_")
+        X_df = pd.DataFrame(X).copy()
+        missing = set(self.scalers_) - set(X_df.columns)
+        if missing and strict:
+            raise ValueError(f"Missing columns during transform: {missing}")
+
         for col, scaler in self.scalers_.items():
-            if scaler is not None:
+            if col in X_df.columns and scaler is not None:
                 X_df[col] = scaler.inverse_transform(X_df[[col]])
-        return X_df if return_df else X_df.values
+
+        if log_level == "full":
+            untouched = set(X_df.columns) - set(self.scalers_)
+            if untouched:
+                self.logger.info("Untouched columns preserved: %s", list(untouched))
+
+        if keep_other_cols:
+            return X_df if return_df else X_df.values
+        else:
+            X_scaled_only = X_df[list(self.scalers_)]
+            return X_scaled_only if return_df else X_scaled_only.values
 
     # ------------------------------------------------------------------
     # UTILIDADES
     # ------------------------------------------------------------------
     def get_feature_names_out(self, input_features=None):
+        if input_features is None:
+            return getattr(self, "feature_names_in_", None)
         return np.array(input_features)
 
     def report_as_df(self) -> pd.DataFrame:
@@ -238,6 +322,9 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         if isinstance(features, str):
             features = [features]
 
+        if self.plot_backend == "none":
+            return
+
         for feature in features:
             if feature not in self.scalers_:
                 self.logger.warning("Variável '%s' não foi tratada no fit. Pulando...", feature)
@@ -249,13 +336,19 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
 
             # Original
             plt.subplot(1, 2, 1)
-            sns.histplot(original_df[feature].dropna(), bins=30, kde=True, color="steelblue")
+            if self.plot_backend == "seaborn":
+                sns.histplot(original_df[feature].dropna(), bins=30, kde=True, color="steelblue")
+            else:
+                plt.hist(original_df[feature].dropna(), bins=30, color="steelblue", alpha=0.7)
             plt.title(f"{feature} — original")
             plt.xlabel(feature)
 
             # Transformada
             plt.subplot(1, 2, 2)
-            sns.histplot(transformed_df[feature].dropna(), bins=30, kde=True, color="darkorange")
+            if self.plot_backend == "seaborn":
+                sns.histplot(transformed_df[feature].dropna(), bins=30, kde=True, color="darkorange")
+            else:
+                plt.hist(transformed_df[feature].dropna(), bins=30, color="darkorange", alpha=0.7)
             plt.title(f"{feature} — escalado com {scaler_nome}")
             plt.xlabel(feature)
 
@@ -273,7 +366,9 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
             'scalers': self.scalers_,
             'report':  self.report_,
             'strategy': self.strategy,
-            'random_state': self.random_state
+            'random_state': self.random_state,
+            'library_version': sklearn.__version__,
+            'columns_hash': self.columns_hash_
         }, path)
         self.logger.info("Scalers salvos em %s", path)
 
@@ -284,5 +379,15 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         self.report_   = data.get('report', {})
         self.strategy  = data.get('strategy', self.strategy)
         self.random_state = data.get('random_state', self.random_state)
+        self.feature_names_in_ = np.array(list(self.scalers_.keys()))
+        self.n_features_in_ = len(self.feature_names_in_)
+        expected_hash = hashlib.md5(",".join(self.scalers_).encode()).hexdigest()
+        if data.get('columns_hash') != expected_hash:
+            raise ValueError('Columns hash mismatch')
+        if data.get('library_version') != sklearn.__version__:
+            self.logger.warning(
+                "Library version mismatch: %s vs %s",
+                data.get('library_version'), sklearn.__version__)
+        self.columns_hash_ = expected_hash
         self.logger.info("Scalers carregados de %s", path)
         return self
