@@ -44,6 +44,9 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
     random_state : int, default=0
         Usado no QuantileTransformer e em amostragens internas.
 
+    ignore_cols : list[str] | None
+        Colunas numéricas a serem preservadas sem escalonamento.
+
     logger : logging.Logger | None
         Logger customizado; se None, cria logger básico.
     """
@@ -65,6 +68,7 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
                  profile: str = 'default',
                  shapiro_n: int = 5000,
                  n_jobs: int = 1,
+                 ignore_cols: list[str] | None = None,
                  logger: logging.Logger | None = None):
         self.strategy = strategy.lower() if strategy else None
         self.serialize = serialize
@@ -79,6 +83,7 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         self.profile = profile
         self.shapiro_n = shapiro_n
         self.n_jobs = n_jobs
+        self.ignore_cols = set(ignore_cols or [])
 
         self.scalers_: dict[str, BaseEstimator] | None = None
         self.report_:  dict[str, dict] = {}      # estatísticas por coluna
@@ -174,6 +179,13 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None, *, stats_callback: Callable | None = None):
         X_df = pd.DataFrame(X)
         num_df = X_df.select_dtypes("number")
+        ignore_in_data = []
+        if self.ignore_cols:
+            ignore_in_data = list(set(self.ignore_cols) & set(num_df.columns))
+            if ignore_in_data:
+                self.logger.info("Ignoring columns (no scaling): %s", ignore_in_data)
+                num_df = num_df.drop(columns=ignore_in_data)
+        self.ignored_cols_ = ignore_in_data
         non_numeric = set(X_df.columns) - set(num_df.columns)
         if non_numeric:
             self.logger.warning("Ignoring non-numeric columns: %s", list(non_numeric))

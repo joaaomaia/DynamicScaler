@@ -29,3 +29,12 @@ def test_check_is_fitted():
     scaler = DynamicScaler(strategy='standard')
     with pytest.raises(NotFittedError):
         scaler.transform(pd.DataFrame({'a': [1, 2]}))
+
+
+def test_ignore_cols_no_scaling():
+    df = pd.DataFrame({'a': [1.0, 2.0, 3.0], 'b': [10.0, 20.0, 30.0]})
+    scaler = DynamicScaler(strategy='standard', ignore_cols=['b'])
+    scaler.fit(df)
+    transformed = scaler.transform(df, return_df=True)
+    pd.testing.assert_series_equal(transformed['b'], df['b'])
+    assert 'b' not in scaler.scalers_
