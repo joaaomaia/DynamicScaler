@@ -92,7 +92,7 @@ df_scaled = scaler.transform(df_full, return_df=True)
 ```mermaid
 flowchart TD
     INICIO[Inicio coluna numerica] --> CONST{Constante\nunicos == 1}
-    CONST -- Sim --> PASS1 Nao escalonar
+    CONST -- Sim --> PASS1[Nao escalonar]
     CONST -- Nao --> R01{Ja esta em 0-1\n0.95 <= min,max <= 1.05}
     R01 -- Sim --> PASS2[Nao escalonar]
     R01 -- Nao --> METRICAS[Calcula Shapiro p, Assimetria, Curtose]
