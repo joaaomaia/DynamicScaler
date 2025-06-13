@@ -98,7 +98,7 @@ flowchart TD
     R01 -- Nao --> METRICAS[Calcula Shapiro p, Assimetria, Curtose]
     METRICAS --> PTCOND{Assimetria > limiar_power\nCurtose <= limiar_curtose\np < p_val}
     PTCOND -- Sim --> POWER[PowerTransformer Box-Cox ou Yeo-Johnson]
-    PTCOND -- Nao --> NORMAL{p >= 0.05 e\n|Assimetria| <= 0.5}
+    PTCOND -- Nao --> NORMAL{p >= 0.05 e\nabs(Assimetria) <= 0.5}
     NORMAL -- Sim --> PADRAO[StandardScaler]
     NORMAL -- Nao --> PESADA{Assimetria > 3 ou\nCurtose > 20}
     PESADA -- Sim --> QUANTIL[QuantileTransformer para Normal]
