@@ -100,7 +100,7 @@ flowchart TD
     PTCOND -- Sim --> POWER[PowerTransformer Box-Cox ou Yeo-Johnson]
     PTCOND -- Nao --> NORMAL{p alto -- assimetria baixa}
     NORMAL -- Sim --> PADRAO[StandardScaler]
-    NORMAL -- Nao --> PESADA{Assimetria extrema ou\ncurtose muito alta}
+    NORMAL -- Nao --> PESADA{Assimetria extrema ou -- curtose muito alta}
     PESADA -- Sim --> QUANTIL[QuantileTransformer para distribuicao normal]
     PESADA -- Nao --> ROBUSTEZ{Assimetria moderada}
     ROBUSTEZ -- Sim --> ROBUSTO[RobustScaler]
