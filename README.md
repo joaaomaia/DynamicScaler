@@ -91,14 +91,14 @@ df_scaled = scaler.transform(df_full, return_df=True)
 
 ```mermaid
 flowchart TD
-    INICIO[Inicio coluna numerica] --> CONST{Constante\nvalores unicos igual a 1}
+    INICIO[Inicio coluna numerica] --> CONST{Constante -- valores unicos igual a 1}
     CONST -- Sim --> PASS1[Nao escalonar]
-    CONST -- Nao --> R01{Ja esta entre zero e um\nvalores proximos de zero e um}
+    CONST -- Nao --> R01{Ja esta entre zero e um -- valores proximos de zero e um}
     R01 -- Sim --> PASS2[Nao escalonar]
     R01 -- Nao --> METRICAS[Calcula Shapiro p, Assimetria, Curtose]
-    METRICAS --> PTCOND{Alta assimetria\nCurtose moderada\np pequeno}
+    METRICAS --> PTCOND{Alta assimetria -- Curtose moderada -- p pequeno}
     PTCOND -- Sim --> POWER[PowerTransformer Box-Cox ou Yeo-Johnson]
-    PTCOND -- Nao --> NORMAL{p alto\nassimetria baixa}
+    PTCOND -- Nao --> NORMAL{p alto -- assimetria baixa}
     NORMAL -- Sim --> PADRAO[StandardScaler]
     NORMAL -- Nao --> PESADA{Assimetria extrema ou\ncurtose muito alta}
     PESADA -- Sim --> QUANTIL[QuantileTransformer para distribuicao normal]
