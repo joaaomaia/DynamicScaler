@@ -91,18 +91,18 @@ df_scaled = scaler.transform(df_full, return_df=True)
 
 ```mermaid
 flowchart TD
-    INICIO[Inicio coluna numerica] --> CONST{Constante\nunicos == 1}
+    INICIO[Inicio coluna numerica] --> CONST{Constante\nvalores unicos igual a 1}
     CONST -- Sim --> PASS1[Nao escalonar]
-    CONST -- Nao --> R01{Ja esta em 0-1\n0.95 <= min,max <= 1.05}
+    CONST -- Nao --> R01{Ja esta entre zero e um\nvalores proximos de zero e um}
     R01 -- Sim --> PASS2[Nao escalonar]
     R01 -- Nao --> METRICAS[Calcula Shapiro p, Assimetria, Curtose]
-    METRICAS --> PTCOND{Assimetria > limiar_power\nCurtose <= limiar_curtose\np < p_val}
+    METRICAS --> PTCOND{Alta assimetria\nCurtose moderada\np pequeno}
     PTCOND -- Sim --> POWER[PowerTransformer Box-Cox ou Yeo-Johnson]
-    PTCOND -- Nao --> NORMAL{p >= 0.05 e\nabs(Assimetria) <= 0.5}
+    PTCOND -- Nao --> NORMAL{p alto\nassimetria baixa}
     NORMAL -- Sim --> PADRAO[StandardScaler]
-    NORMAL -- Nao --> PESADA{Assimetria > 3 ou\nCurtose > 20}
-    PESADA -- Sim --> QUANTIL[QuantileTransformer para Normal]
-    PESADA -- Nao --> ROBUSTEZ{Assimetria > 0.5}
+    NORMAL -- Nao --> PESADA{Assimetria extrema ou\ncurtose muito alta}
+    PESADA -- Sim --> QUANTIL[QuantileTransformer para distribuicao normal]
+    PESADA -- Nao --> ROBUSTEZ{Assimetria moderada}
     ROBUSTEZ -- Sim --> ROBUSTO[RobustScaler]
     ROBUSTEZ -- Nao --> MINMAX[MinMaxScaler]
 ```
