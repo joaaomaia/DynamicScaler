@@ -28,7 +28,7 @@ df = pd.DataFrame({
 })
 
 # Inicializa o AutoScaler em modo automático
-selector = ScalerSelector(strategy='auto', serialize=True, save_path='scalers.pkl')
+selector = DynamicScaler(strategy='auto', serialize=True, save_path='scalers.pkl')
 
 # Ajusta os scalers ao DataFrame
 selector.fit(df)
@@ -45,6 +45,18 @@ print(selector.report_as_df())
 # Plota histogramas antes/depois
 selector.plot_histograms(df, df_scaled, features=['idade', 'salario'])
 ```
+
+## Exemplo com PowerTransformer
+
+scaler = DynamicScaler(
+    strategy="auto",
+    power_skew_thr=1.2,
+    power_kurt_thr=15,
+    random_state=42,
+    verbose=True
+)
+scaler.fit(df_train)
+df_scaled = scaler.transform(df_full, return_df=True)
 
 ---
 
@@ -75,6 +87,38 @@ selector.plot_histograms(df, df_scaled, features=['idade', 'salario'])
 | `logger`       | `logging.Logger` \| `None`                                        | Logger customizado; se `None`, cria logger padrão.                        |
 
 ---
+## Fluxo da estratégia `auto`
+
+```mermaid
+flowchart TD
+    Inicio([Início]) --> VerificaEstrategia{estrategia is auto?}
+
+    VerificaEstrategia -- Não --> AplicaFixa[Aplicar scaler escolhido para todas as colunas]
+    AplicaFixa --> Fim
+
+    VerificaEstrategia -- Sim --> TrataMissing[Remover ou imputar valores ausentes se habilitado]
+    TrataMissing --> VerificaConstante{Coluna é constante?}
+    VerificaConstante -- Sim --> SemScaler[Não aplicar scaler; motivo: coluna constante] --> Fim
+    VerificaConstante -- Não --> Amostragem[Amostrar até N linhas para análise]
+    Amostragem --> CalculaMetricas[Calcular p-valor de Shapiro, assimetria e curtose]
+    
+    CalculaMetricas --> JaEscalonada{Os dados já estão entre 0 e 1?}
+    JaEscalonada -- Sim --> IgnoraScaler[Não aplicar scaler; motivo: já escalonada] --> Fim
+    JaEscalonada -- Não --> VerificaNormalidade{p-valor de Shapiro > limiar?}
+
+    VerificaNormalidade -- Sim --> UsaStandardScaler[Atribuir StandardScaler; motivo: distribuição normal] --> Fim
+    VerificaNormalidade -- Não --> VerificaAssimetria{Assimetria absoluta > limiar?}
+    
+    VerificaAssimetria -- Não --> UsaMinMaxScaler[Atribuir MinMaxScaler; motivo: baixa assimetria] --> Fim
+    VerificaAssimetria -- Sim --> VerificaCurtose{Curtose < máximo permitido?}
+    VerificaCurtose -- Não --> UsaRobustScaler[Atribuir RobustScaler; motivo: presença de outliers] --> Fim
+    VerificaCurtose -- Sim --> VerificaValoresPositivos{Todos os valores são > 0?}
+    
+    VerificaValoresPositivos -- Sim --> UsaBoxCox[Atribuir PowerTransformer com método box-cox; motivo: alta assimetria com valores positivos] --> Fim
+    VerificaValoresPositivos -- Não --> UsaYeoJohnson[Atribuir PowerTransformer com método yeo-johnson; motivo: alta assimetria com valores mistos] --> Fim
+
+    Fim([Fim])
+```
 
 ## 🤝 Contribuições
 
