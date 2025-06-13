@@ -84,6 +84,9 @@ df_scaled = scaler.transform(df_full, return_df=True)
 | `serialize`    | `bool`                                                            | Se `True`, salva automaticamente scalers e relatório em `save_path` após o `fit`. |
 | `save_path`    | `str` \| `Path`                                                   | Caminho para o arquivo `.pkl` de serialização (default: `'scalers.pkl'`). |
 | `random_state` | `int`                                                             | Semente para amostragem e `QuantileTransformer` (default: `0`).           |
+| `ignore_cols` | `list[str]`
+    | Colunas preservadas sem escalonamento.
+ |
 | `logger`       | `logging.Logger` \| `None`                                        | Logger customizado; se `None`, cria logger padrão.                        |
 
 ---
