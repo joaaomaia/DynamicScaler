@@ -91,20 +91,20 @@ df_scaled = scaler.transform(df_full, return_df=True)
 
 ```mermaid
 flowchart TD
-    START([Start: numeric column]) --> CONST{Constant?\nunique == 1}
-    CONST -- Yes --> PASS1[Passthrough]
-    CONST -- No --> R01{Already [0‑1]?\n0.95≤min,max≤1.05}
-    R01 -- Yes --> PASS2[Passthrough]
-    R01 -- No --> METRICS[Compute Shapiro p, Skew, Kurtosis]
-    METRICS --> PTCOND{abs(sk) > power_skew_thr\n& kurtosis ≤ power_kurt_thr\n& p < p_thr}
-    PTCOND -- Yes --> POWER[PowerTransformer\n(Box‑Cox / Yeo‑Johnson)]
-    PTCOND -- No --> NORM{p ≥ 0.05 & abs(sk) ≤ 0.5}
-    NORM -- Yes --> STANDARD[StandardScaler]
-    NORM -- No --> HEAVY{abs(sk) > 3 OR\n kurtosis > 20}
-    HEAVY -- Yes --> QUANTILE[QuantileTransformer → Normal]
-    HEAVY -- No --> ROB{abs(sk) > 0.5}
-    ROB -- Yes --> ROBUST[RobustScaler]
-    ROB -- No --> MINMAX[MinMaxScaler]
+    INICIO[Início: coluna numérica] --> CONST{Constante?\núnicos == 1}
+    CONST -- Sim --> PASS1[Não escalonar]
+    CONST -- Não --> R01{Já está em [0‑1]?\n0.95 ≤ min,max ≤ 1.05}
+    R01 -- Sim --> PASS2[Não escalonar]
+    R01 -- Não --> METRICAS[Calcula Shapiro p, Assimetria, Curtose]
+    METRICAS --> PTCOND{assimetria > limiar_power\ne curtose ≤ limiar_curtose\ne p < p_val}
+    PTCOND -- Sim --> POWER[PowerTransformer\n(Box‑Cox ou Yeo‑Johnson)]
+    PTCOND -- Não --> NORMAL{p ≥ 0.05 e\n|assimetria| ≤ 0.5}
+    NORMAL -- Sim --> PADRAO[StandardScaler]
+    NORMAL -- Não --> PESADA{assimetria > 3 ou\n curtose > 20}
+    PESADA -- Sim --> QUANTIL[QuantileTransformer para Normal]
+    PESADA -- Não --> ROBUSTEZ{assimetria > 0.5}
+    ROBUSTEZ -- Sim --> ROBUSTO[RobustScaler]
+    ROBUSTEZ -- Não --> MINMAX[MinMaxScaler]
 ```
 
 ## 🤝 Contribuições
