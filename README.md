@@ -91,33 +91,20 @@ df_scaled = scaler.transform(df_full, return_df=True)
 
 ```mermaid
 flowchart TD
-    Inicio([Início]) --> VerificaEstrategia{estrategia is auto?}
-
-    VerificaEstrategia -- Não --> AplicaFixa[Aplicar scaler escolhido para todas as colunas]
-    AplicaFixa --> Fim
-
-    VerificaEstrategia -- Sim --> TrataMissing[Remover ou imputar valores ausentes se habilitado]
-    TrataMissing --> VerificaConstante{Coluna é constante?}
-    VerificaConstante -- Sim --> SemScaler[Não aplicar scaler; motivo: coluna constante] --> Fim
-    VerificaConstante -- Não --> Amostragem[Amostrar até N linhas para análise]
-    Amostragem --> CalculaMetricas[Calcular p-valor de Shapiro, assimetria e curtose]
-    
-    CalculaMetricas --> JaEscalonada{Os dados já estão entre 0 e 1?}
-    JaEscalonada -- Sim --> IgnoraScaler[Não aplicar scaler; motivo: já escalonada] --> Fim
-    JaEscalonada -- Não --> VerificaNormalidade{p-valor de Shapiro > limiar?}
-
-    VerificaNormalidade -- Sim --> UsaStandardScaler[Atribuir StandardScaler; motivo: distribuição normal] --> Fim
-    VerificaNormalidade -- Não --> VerificaAssimetria{Assimetria absoluta > limiar?}
-    
-    VerificaAssimetria -- Não --> UsaMinMaxScaler[Atribuir MinMaxScaler; motivo: baixa assimetria] --> Fim
-    VerificaAssimetria -- Sim --> VerificaCurtose{Curtose < máximo permitido?}
-    VerificaCurtose -- Não --> UsaRobustScaler[Atribuir RobustScaler; motivo: presença de outliers] --> Fim
-    VerificaCurtose -- Sim --> VerificaValoresPositivos{Todos os valores são > 0?}
-    
-    VerificaValoresPositivos -- Sim --> UsaBoxCox[Atribuir PowerTransformer com método box-cox; motivo: alta assimetria com valores positivos] --> Fim
-    VerificaValoresPositivos -- Não --> UsaYeoJohnson[Atribuir PowerTransformer com método yeo-johnson; motivo: alta assimetria com valores mistos] --> Fim
-
-    Fim([Fim])
+    START([Start: numeric column]) --> CONST{Constant?\nunique == 1}
+    CONST -- Yes --> PASS1[Passthrough]
+    CONST -- No --> R01{Already [0‑1]?\n0.95≤min,max≤1.05}
+    R01 -- Yes --> PASS2[Passthrough]
+    R01 -- No --> METRICS[Compute Shapiro p, Skew, Kurtosis]
+    METRICS --> PTCOND{abs(sk) > power_skew_thr\n& kurtosis ≤ power_kurt_thr\n& p < p_thr}
+    PTCOND -- Yes --> POWER[PowerTransformer\n(Box‑Cox / Yeo‑Johnson)]
+    PTCOND -- No --> NORM{p ≥ 0.05 & abs(sk) ≤ 0.5}
+    NORM -- Yes --> STANDARD[StandardScaler]
+    NORM -- No --> HEAVY{abs(sk) > 3 OR\n kurtosis > 20}
+    HEAVY -- Yes --> QUANTILE[QuantileTransformer → Normal]
+    HEAVY -- No --> ROB{abs(sk) > 0.5}
+    ROB -- Yes --> ROBUST[RobustScaler]
+    ROB -- No --> MINMAX[MinMaxScaler]
 ```
 
 ## 🤝 Contribuições
