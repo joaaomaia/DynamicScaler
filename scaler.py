@@ -6,7 +6,11 @@ import joblib
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn as sns
+
+try:
+    import seaborn as sns  # type: ignore
+except Exception:  # pragma: no cover - optional dependency
+    sns = None
 from scipy import stats
 from scipy.stats import shapiro, skew, kurtosis
 import sklearn
@@ -15,7 +19,8 @@ from typing import Callable
 
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.preprocessing import (
-    StandardScaler, RobustScaler, MinMaxScaler, QuantileTransformer
+    StandardScaler, RobustScaler, MinMaxScaler, QuantileTransformer,
+    PowerTransformer,
 )
 
 class DynamicScaler(BaseEstimator, TransformerMixin):
@@ -54,6 +59,12 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
                  random_state: int = 0,
                  missing_strategy: str = 'none',
                  plot_backend: str = 'matplotlib',
+                 power_skew_thr: float = 1.0,
+                 power_kurt_thr: float = 10.0,
+                 power_method: str = 'auto',
+                 profile: str = 'default',
+                 shapiro_n: int = 5000,
+                 n_jobs: int = 1,
                  logger: logging.Logger | None = None):
         self.strategy = strategy.lower() if strategy else None
         self.serialize = serialize
@@ -62,9 +73,16 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         self.random_state = random_state
         self.missing_strategy = missing_strategy
         self.plot_backend = plot_backend
+        self.power_skew_thr = power_skew_thr
+        self.power_kurt_thr = power_kurt_thr
+        self.power_method = power_method
+        self.profile = profile
+        self.shapiro_n = shapiro_n
+        self.n_jobs = n_jobs
 
         self.scalers_: dict[str, BaseEstimator] | None = None
         self.report_:  dict[str, dict] = {}      # estatísticas por coluna
+        self.stats_:   dict[str, dict] = {}
 
         # logger
         if logger:
@@ -75,7 +93,7 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
                 logging.basicConfig(level=logging.INFO,
                                     format="%(levelname)s: %(message)s")
 
-        self.tags_ = {"allow_nan": True}
+        self.tags_ = {"allow_nan": True, "X_types": ["2darray", "dataframe"]}
 
     # ------------------------------------------------------------------
     # MÉTODO INTERNO PARA ESTRATÉGIA AUTO
@@ -97,7 +115,7 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
 
         # ---------------- métricas básicas ----------------
         try:
-            p_val = shapiro(sample.sample(min(5000, len(sample)),
+            p_val = shapiro(sample.sample(min(self.shapiro_n, len(sample)),
                                           random_state=self.random_state))[1]
         except Exception:   # amostra minúscula ou erro numérico
             p_val = 0.0
@@ -123,12 +141,19 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
 
 
         # ---------------- escolha de scaler ----------------
-        if p_val >= 0.05 and abs(sk) <= 0.5:
+        if (abs(sk) > self.power_skew_thr and kt <= self.power_kurt_thr and
+                p_val < self.shapiro_p_val):
+            method = self.power_method
+            if method == 'auto':
+                method = 'box-cox' if sample.min() > 0 else 'yeo-johnson'
+            scaler = PowerTransformer(method=method, standardize=True)
+            reason = f"{method} (high skew)"
+        elif p_val >= 0.05 and abs(sk) <= 0.5:
             scaler = StandardScaler()
             reason = '≈normal'
         elif abs(sk) > 3 or kt > 20:
             scaler = QuantileTransformer(output_distribution='normal',
-                                          random_state=self.random_state)
+                                         random_state=self.random_state)
             reason = 'assimetria/kurtosis extrema'
         elif abs(sk) > 0.5:
             scaler = RobustScaler()
@@ -153,13 +178,75 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         if non_numeric:
             self.logger.warning("Ignoring non-numeric columns: %s", list(non_numeric))
         X_df = num_df
+        if self.missing_strategy == 'drop':
+            X_df = X_df.dropna()
+        self.dtypes_ = X_df.dtypes.to_dict()
 
         if self.strategy not in {'auto', 'standard', 'robust',
                                  'minmax', 'quantile', None}:
             raise ValueError(f"strategy '{self.strategy}' não suportada.")
 
         self.scalers_ = {}
-        for col in X_df.columns:
+
+        def _process(col):
+            if self.strategy == 'auto':
+                scaler, stats = self._choose_auto(X_df[col], stats_callback=stats_callback)
+            elif self.strategy == 'standard':
+                scaler = StandardScaler(); stats = dict(reason='global-standard', scaler='StandardScaler')
+            elif self.strategy == 'robust':
+                scaler = RobustScaler(); stats = dict(reason='global-robust', scaler='RobustScaler')
+            elif self.strategy == 'minmax':
+                scaler = MinMaxScaler(); stats = dict(reason='global-minmax', scaler='MinMaxScaler')
+            elif self.strategy == 'quantile':
+                scaler = QuantileTransformer(output_distribution='normal', random_state=self.random_state)
+                stats = dict(reason='global-quantile', scaler='QuantileTransformer')
+            else:
+                scaler = None; stats = dict(reason='passthrough', scaler='None')
+
+            fill_value = None
+            if self.missing_strategy == 'median':
+                fill_value = X_df[col].median()
+            elif self.missing_strategy == 'mean':
+                fill_value = X_df[col].mean()
+            elif self.missing_strategy == 'constant':
+                fill_value = 0
+            if fill_value is not None:
+                X_df[col] = X_df[col].fillna(fill_value)
+                stats['fill_value'] = fill_value
+
+            if scaler is not None:
+                scaler.fit(X_df[[col]])
+                if isinstance(scaler, PowerTransformer):
+                    transformed = scaler.transform(X_df[[col]])
+                    post_sk = skew(transformed.ravel(), nan_policy="omit")
+                    post_kt = kurtosis(transformed.ravel(), nan_policy="omit")
+                    stats['post_skew'] = post_sk
+                    stats['post_kurtosis'] = post_kt
+                    self.stats_[col] = {
+                        'pre_skew': stats.get('skew'),
+                        'pre_kurt': stats.get('kurtosis'),
+                        'post_skew': post_sk,
+                        'post_kurt': post_kt,
+                    }
+            return col, scaler, stats
+
+        if self.n_jobs == 1:
+            results = [_process(col) for col in X_df.columns]
+        else:
+            results = Parallel(n_jobs=self.n_jobs)(delayed(_process)(col) for col in X_df.columns)
+
+        for col, scaler, stats in results:
+            self.scalers_[col] = scaler
+            self.report_[col] = stats
+
+            self.logger.info(
+                "Coluna '%s' → %s (p=%.3f, skew=%.2f, kurt=%.1f) | motivo: %s",
+                col, stats.get('scaler'),
+                stats.get('p_value', np.nan),
+                stats.get('skew',     np.nan),
+                stats.get('kurtosis', np.nan),
+                stats['reason'],
+            )
             # --- seleção do scaler -----------------------------------
             if self.strategy == 'auto':
                 scaler, stats = self._choose_auto(X_df[col], stats_callback=stats_callback)
@@ -195,6 +282,18 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
             # --- ajuste ---------------------------------------------
             if scaler is not None:
                 scaler.fit(X_df[[col]])
+                if isinstance(scaler, PowerTransformer):
+                    transformed = scaler.transform(X_df[[col]])
+                    post_sk = skew(transformed.ravel(), nan_policy="omit")
+                    post_kt = kurtosis(transformed.ravel(), nan_policy="omit")
+                    stats['post_skew'] = post_sk
+                    stats['post_kurtosis'] = post_kt
+                    self.stats_[col] = {
+                        'pre_skew': stats.get('skew'),
+                        'pre_kurt': stats.get('kurtosis'),
+                        'post_skew': post_sk,
+                        'post_kurt': post_kt,
+                    }
 
             self.scalers_[col] = scaler
             self.report_[col]  = stats
@@ -235,6 +334,8 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
                 scaler.partial_fit(X_df[[col]])
             else:
                 self.logger.info("Column '%s' scaler does not support partial_fit", col)
+                if self.profile == 'streaming' and isinstance(scaler, PowerTransformer):
+                    self.logger.info("PowerTransformer lacks partial_fit support")
         return self
 
     # ------------------------------------------------------------------
@@ -244,6 +345,9 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
                   keep_other_cols: bool = True, log_level: str = "full"):
         check_is_fitted(self, "feature_names_in_")
         X_df = pd.DataFrame(X).copy()
+
+        if self.missing_strategy == 'drop':
+            X_df = X_df.dropna()
 
         missing = set(self.scalers_) - set(X_df.columns)
         if missing and strict:
@@ -280,6 +384,10 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
             if col in X_df.columns and scaler is not None:
                 X_df[col] = scaler.inverse_transform(X_df[[col]])
 
+        for col, dt in getattr(self, 'dtypes_', {}).items():
+            if col in X_df.columns:
+                X_df[col] = X_df[col].astype(dt)
+
         if log_level == "full":
             untouched = set(X_df.columns) - set(self.scalers_)
             if untouched:
@@ -303,7 +411,7 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         """Devolve o relatório de métricas/decisões como DataFrame."""
         return pd.DataFrame.from_dict(self.report_, orient='index')
 
-    def plot_histograms(self, original_df: pd.DataFrame, transformed_df: pd.DataFrame, features: str | list[str]):
+    def plot_histograms(self, original_df: pd.DataFrame, transformed_df: pd.DataFrame, features: str | list[str], *, show_qq: bool = False):
         """
         Plota histogramas lado a lado (antes/depois do escalonamento) para uma ou mais variáveis.
 
@@ -332,10 +440,11 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
 
             scaler_nome = self.report_.get(feature, {}).get("scaler", "Desconhecido")
 
-            plt.figure(figsize=(12, 4))
+            cols = 3 if show_qq and self.plot_backend == "matplotlib" else 2
+            plt.figure(figsize=(6 * cols, 4))
 
             # Original
-            plt.subplot(1, 2, 1)
+            plt.subplot(1, cols, 1)
             if self.plot_backend == "seaborn":
                 sns.histplot(original_df[feature].dropna(), bins=30, kde=True, color="steelblue")
             else:
@@ -344,13 +453,18 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
             plt.xlabel(feature)
 
             # Transformada
-            plt.subplot(1, 2, 2)
+            plt.subplot(1, cols, 2)
             if self.plot_backend == "seaborn":
                 sns.histplot(transformed_df[feature].dropna(), bins=30, kde=True, color="darkorange")
             else:
                 plt.hist(transformed_df[feature].dropna(), bins=30, color="darkorange", alpha=0.7)
             plt.title(f"{feature} — escalado com {scaler_nome}")
             plt.xlabel(feature)
+
+            if show_qq and self.plot_backend == "matplotlib":
+                plt.subplot(1, cols, 3)
+                stats.probplot(transformed_df[feature].dropna(), dist="norm", plot=plt)
+                plt.title(f"{feature} — QQ")
 
             plt.tight_layout()
             plt.show()
@@ -369,7 +483,7 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
             'random_state': self.random_state,
             'library_version': sklearn.__version__,
             'columns_hash': self.columns_hash_
-        }, path)
+        }, path, compress=('gzip', 3))
         self.logger.info("Scalers salvos em %s", path)
 
     def load(self, path: str | pathlib.Path):
