@@ -1,21 +1,23 @@
 # 📊 DynamicScaler
 
-Selecione e aplique dinamicamente o scaler mais adequado para cada feature numérica, com base em testes de normalidade (Shapiro), assimetria e detecção de outliers.
+**DynamicScaler** seleciona automaticamente o melhor scaler para cada variável numérica — e grava tudo de forma auditável.  
+Ele combina testes estatísticos (normalidade, skew, curtose) com *optional* **validação cruzada preditiva** para garantir que **só transforma quando há ganho real**.
 
-## ✨ Características
+---
 
-- **Estratégias disponíveis**:  
-  - `auto`: decide o scaler por coluna usando critérios estatísticos.  
-  - `standard`, `robust`, `minmax`, `quantile`: aplica o mesmo scaler a todas as colunas.  
-  - `passthrough`: não aplica escalonamento.  
-- **Compatível com `scikit-learn` Pipelines**, facilitando integração em fluxos de trabalho.
-- **Serialização** automática de scalers e relatórios em arquivo `.pkl` (`save` / `load`).
-- **Relatórios** via DataFrame (`report_as_df`) e **visualizações** de histogramas antes/depois (`plot_histograms`).
-- Ao plotar histogramas, se a coluna não for escalonada o título exibe "Nenhum".
-- **Validação rápida** com amostra holdout e fallback entre scalers.
-- **`ignore_scalers`** para pular transformadores indesejados.
-- **StandardScaler** só é considerado se o teste de Shapiro-Wilk indicar normalidade.
-- **MinMaxScaler** entra na fila como último recurso.
+## ✨ Principais Características
+
+| Recurso | Descrição |
+|---------|-----------|
+| **Estratégias** | `'auto'`, `'standard'`, `'robust'`, `'minmax'`, `'quantile'`, `None` (passthrough). |
+| **Teste de normalidade** | `StandardScaler` só é considerado se o p‑valor do Shapiro‑Wilk ≥ `shapiro_p_val`. |
+| **Fila inteligente** | `PowerTransformer → QuantileTransformer → RobustScaler → MinMaxScaler*` (*somente se `allow_minmax=True`). |
+| **Validação estatística** | Checa pós‑transformação: desvio‑padrão, IQR e nº de valores únicos. |
+| **Teste secundário** | Compara **kurtosis** à linha de base e a `kurtosis_thr`. |
+| **Validação cruzada** | Se `extra_validation=True` *ou* para `MinMaxScaler`, roda CV com XGBoost e exige ganho ≥ `cv_gain_thr`. |
+| **Auditável** | `report_as_df()` mostra métricas, candidatos testados, motivo de rejeição. |
+| **Visual** | `plot_histograms()` compara distribuições antes/depois e exibe o scaler usado. |
+| **Serialização segura** | Só salva scalers aprovados; usa hash de colunas para evitar mismatch em produção. |
 
 ---
 
@@ -23,140 +25,134 @@ Selecione e aplique dinamicamente o scaler mais adequado para cada feature numé
 
 ```python
 import pandas as pd
-from scaler import ScalerSelector
+from dynamic_scaler import DynamicScaler   # nome do módulo/arquivo
 
-# Dados de exemplo
-df = pd.DataFrame({
-    'idade':   [25, 32, 47, 51, 62],
-    'salario': [3000, 4200, 5500, 6100, 7200],
-    'score':   [0.2, 0.5, 0.9, 0.7, 0.3]
-})
-
-# Inicializa o AutoScaler em modo automático
-selector = DynamicScaler(strategy='auto', serialize=True, save_path='scalers.pkl')
-
-# Ajusta os scalers ao DataFrame
-selector.fit(df)
-
-# Transforma os dados (retorna numpy array)
-X_scaled = selector.transform(df)
-
-# Ou, para obter DataFrame já escalonado:
-df_scaled = selector.transform(df, return_df=True)
-
-# Visualiza relatório de decisões
-print(selector.report_as_df())
-
-# Plota histogramas antes/depois
-selector.plot_histograms(df, df_scaled, features=['idade', 'salario'])
-```
-
-## Exemplo com PowerTransformer
+df = pd.read_csv("meus_dados.csv")
 
 scaler = DynamicScaler(
     strategy="auto",
-    power_skew_thr=1.2,
-    power_kurt_thr=15,
-    random_state=42,
-    verbose=True
+    serialize=True,
+    save_path="scalers.pkl",
+    extra_validation=False    # desliga CV para rapidez
 )
-scaler.fit(df_train)
-df_scaled = scaler.transform(df_full, return_df=True)
+
+scaler.fit(df)
+df_scaled = scaler.transform(df, return_df=True)
+
+print(scaler.report_as_df().head())
+scaler.plot_histograms(df, df_scaled, features=['idade', 'renda_mensal'])
+```
+
+### Exemplo avançado com validação cruzada
+
+```python
+scaler_cv = DynamicScaler(
+    strategy="auto",
+    extra_validation=True,    # habilita CV para todos
+    allow_minmax=True,        # deixa MinMax entrar
+    cv_gain_thr=0.003,        # exige ganho de 0.3 p.p. de AUC
+    random_state=42
+)
+
+scaler_cv.fit(df_train[num_cols], y_train)
+X_test_scaled = scaler_cv.transform(df_test[num_cols], return_df=True)
+```
 
 ---
 
-## 📒 API Reference
-
-| Método                                                             | Descrição                                                                                          |
-|--------------------------------------------------------------------|----------------------------------------------------------------------------------------------------|
-| `fit(X, y=None)`                                                   | Ajusta cada scaler conforme a estratégia selecionada e preenche o relatório interno.               |
-| `transform(X, return_df=False)`                                    | Aplica os scalers ajustados aos dados; retorna `DataFrame` se `return_df=True`, caso contrário `ndarray`. |
-| `inverse_transform(X, return_df=False)`                            | Reverte o escalonamento aplicando o método inverso de cada scaler.                                 |
-| `get_feature_names_out(input_features=None)`                       | Retorna nomes das features transformadas (compatível com pipelines).                               |
-| `report_as_df()`                                                   | Retorna um `pd.DataFrame` com estatísticas e decisões de scaler por coluna.                        |
-| `plot_histograms(original_df, transformed_df, features)`           | Plota histogramas lado a lado (antes/depois) para as features especificadas.                       |
-| `save(path=None)`                                                  | Serializa scalers, relatório e metadados em um arquivo `.pkl`.                                     |
-| `load(path)`                                                       | Carrega scalers, relatório e metadados previamente salvos.                                         |
-
----
-
-## ⚙️ Configuração
-
-| Parâmetro      | Tipo                                                              | Descrição                                                                 |
-|----------------|-------------------------------------------------------------------|---------------------------------------------------------------------------|
-| `strategy`     | `{'auto', 'standard', 'robust', 'minmax', 'quantile', None}`      | Estratégia de escalonamento (default: `'auto'`).                          |
-| `shapiro_p_val`| `float`                                                           | Valor-p mínimo do teste de Shapiro para considerar normalidade (default: `0.01`). |
-| `shapiro_n`    | `int`
-     | Tamanho da amostra usada no teste de Shapiro (default: `5000`). |
-| `serialize`    | `bool`                                                            | Se `True`, salva automaticamente scalers e relatório em `save_path` após o `fit`. |
-| `save_path`    | `str` \| `Path`                                                   | Caminho para o arquivo `.pkl` de serialização (default: `'scalers.pkl'`). |
-| `random_state` | `int`                                                             | Semente para amostragem e `QuantileTransformer` (default: `0`).           |
-| `ignore_cols` | `list[str]`
-    | Colunas preservadas sem escalonamento.
- |
-| `logger`       | `logging.Logger` \| `None`                                        | Logger customizado; se `None`, cria logger padrão.                        |
-| `extra_validation` | `bool`
-    | Habilita validacao preditiva para todos os candidatos. |
-| `allow_minmax` | `bool`
-    | Inclui `MinMaxScaler` na fila quando `True`. |
-| `kurtosis_thr` | `float`
-    | Limite absoluto de curtose apos a transformacao (`10.0`). |
-| `cv_gain_thr` | `float`
-    | Ganho minimo de score de CV (`0.002`). |
-
----
-## Fluxo da estratégia `auto`
+## 📊 Fluxo de Decisão (`strategy='auto'`)
 
 ```mermaid
 flowchart TD
-    INICIO[Inicio coluna numerica] --> CONST{Constante -- valores unicos igual a 1}
-    CONST -- Sim --> PASS1[Nao escalonar]
-    CONST -- Nao --> R01{Ja esta entre zero e um -- valores proximos de zero e um}
-    R01 -- Sim --> PASS2[Nao escalonar]
-    R01 -- Nao --> METRICAS[Calcula Shapiro p, Assimetria, Curtose]
-    METRICAS --> PTCOND{Alta assimetria -- Curtose moderada -- p pequeno}
-    PTCOND -- Sim --> POWER[PowerTransformer Box-Cox ou Yeo-Johnson]
-    PTCOND -- Nao --> NORMAL{p alto -- assimetria baixa}
-    NORMAL -- Sim --> PADRAO[StandardScaler]
-    NORMAL -- Nao --> PESADA{Assimetria extrema ou -- curtose muito alta}
-    PESADA -- Sim --> QUANTIL[QuantileTransformer para distribuicao normal]
-    PESADA -- Nao --> ROBUSTEZ{Assimetria moderada}
-    ROBUSTEZ -- Sim --> ROBUSTO[RobustScaler]
-    ROBUSTEZ -- Nao --> MINMAX[MinMaxScaler]
+    Inicio --> VerificaIgnorados
+    VerificaIgnorados -- ignorado --> Fim
+    VerificaIgnorados -- ok --> TestaNormalidade
+    TestaNormalidade -- normal --> EnfileiraStandard
+    TestaNormalidade -- não_normal --> IgnoraStandard
+    EnfileiraStandard --> Fila
+    IgnoraStandard --> Fila
+    Fila --> Loop
+    Loop --> Candidato
+    Candidato --> ValidaStats
+    ValidaStats -- falha --> Loop
+    ValidaStats -- passa --> ValidaSkew
+    ValidaSkew -- não_melhora --> Loop
+    ValidaSkew -- melhora --> ValidaKurt
+    ValidaKurt -- falha --> Loop
+    ValidaKurt -- passa --> CheckCV
+    CheckCV -- necessidade_cv=true --> ValidaCV
+    CheckCV -- necessidade_cv=false --> Escolhido
+    ValidaCV -- ganho>=thr --> Escolhido
+    ValidaCV -- ganho<thr --> Loop
+    Loop -- fila_vazia --> SemScaler
+    Escolhido --> Salva
+    SemScaler --> Salva
+    Salva --> Fim
 ```
 
-### Validação em duas etapas
+### Segunda etapa de Validação
 
 ```mermaid
 flowchart TD
-    A[Estatísticas básicas] --> B{Skew reduzido?}
-    B -- Não --> R[Rejeita]
-    B -- Sim --> C{Kurtose reduzida?}
-    C -- Não --> R
-    C -- Sim --> D{CV extra?}
-    D -- Não --> Aceita
-    D -- Sim --> E{Ganho >= thr?}
-    E -- Sim --> Aceita
-    E -- Não --> R
+    A[Novo Scaler] --> B{Skew reduzido?}
+    B -- não --> Rejeita
+    B -- sim --> C{Kurtosis adequada?}
+    C -- não --> Rejeita
+    C -- sim --> D{CV habilitada?}
+    D -- não --> Aceita
+    D -- sim --> E{Ganho ≥ cv_gain_thr?}
+    E -- sim --> Aceita
+    E -- não --> Rejeita
 ```
 
-O `MinMaxScaler` só participa se `allow_minmax=True` e não estiver em `ignore_scalers`. A etapa de cross-validation preditiva pode aumentar o tempo de execução devido ao treinamento repetido do `XGBoost`.
+---
+
+## 📒 Referência de API
+
+| Método | Descrição |
+|--------|-----------|
+| `fit(X, y=None)` | Treina e seleciona scalers; aceita `y` se precisar de CV. |
+| `transform(X, return_df=False)` | Aplica scalers aprovados. |
+| `inverse_transform(X)` | Reverte escalonamento. |
+| `report_as_df()` | DataFrame detalhado com decisão e métricas. |
+| `plot_histograms(orig, trans, features, show_qq=False)` | Visualiza distribuições antes/depois. |
+| `save(path)` / `load(path)` | Serializa e restaura scalers + relatório + metadados. |
+
+---
+
+## ⚙️ Parâmetros Importantes
+
+| Parâmetro | Default | Descrição |
+|-----------|---------|-----------|
+| `shapiro_p_val` | `0.01` | Valor‑p mínimo para considerar a variável normal. |
+| `shapiro_n` | `5000` | Amostra máxima para o teste de Shapiro‑Wilk. |
+| `validation_fraction` | `0.1` | Fração dos dados reservada para validação interna. |
+| `kurtosis_thr` | `10.0` | Limite absoluto de curtose pós‑transformação. |
+| `extra_validation` | `False` | Habilita CV preditiva para **todos** os candidatos. |
+| `allow_minmax` | `True` | Permite que `MinMaxScaler` entre na fila. |
+| `cv_gain_thr` | `0.002` | Ganho mínimo de score em CV para aceitar scaler. |
+| `ignore_scalers` | `[]` | Lista de scalers a serem ignorados de antemão. |
+
+*(veja `help(DynamicScaler)` para todos os parâmetros)*
+
+---
+
+## 🔐 Serialização e Hash
+
+Ao salvar, o DynamicScaler:
+1. Mantém **apenas os scalers aprovados** (`selected_cols_`).
+2. Cria um **hash MD5** das colunas salvas para garantir consistência.  
+   No `load()`, se o hash divergir, é levantado erro — evita usar um scaler
+   incompatível com o dataset atual.
+
+---
 
 ## 🤝 Contribuições
 
-Contribuições são bem-vindas! Para sugerir melhorias:
+Contribuições são bem‑vindas!  
+Faça **fork**, crie um branch, abra seu *pull request* e vamos evoluir juntos.  
+Issues com dúvidas, bugs ou sugestões são muito bem‑vindas.
 
-1. Faça um fork deste repositório.  
-2. Crie um branch para sua feature:  
-   ```bash
-   git checkout -b feature/nome-da-feature
-   ```  
-3. Commit suas mudanças:  
-   ```bash
-   git commit -m "✨ Descrição da funcionalidade"
-   ```  
-4. Envie para o branch remoto:  
-   ```bash
-   git push origin feature/nome-da-feature
-   ```  
-5. Abra um Pull Request.
+---
+
+> **Licença**: MIT
