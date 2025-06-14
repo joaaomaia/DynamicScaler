@@ -119,6 +119,16 @@ flowchart TD
 | `plot_histograms(orig, trans, features, show_qq=False)` | Visualiza distribuições antes/depois. |
 | `save(path)` / `load(path)` | Serializa e restaura scalers + relatório + metadados. |
 
+## 📝 Colunas do report
+
+| Coluna | Descrição |
+|--------|-----------|
+| `chosen_scaler` | Nome do scaler aprovado ou `None`. |
+| `validation_stats` | Métricas pós-transformação. |
+| `ignored` | Lista de scalers ignorados. |
+| `candidates_tried` | Candidatos testados. |
+| `reason` | Pipe-separated flags explicando por que o scaler foi aceito (ex. stats|skew|kurt|imp). |
+
 ---
 
 ## ⚙️ Parâmetros Importantes

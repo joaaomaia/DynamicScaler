@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1
+- Campo `reason` populado para scalers aceitos com flags de validação.
+- Tabela de colunas do report atualizada.
+
 ## 0.5.0
 - Validação de importância via SHAP/gain substitui ganho de CV.
 - Novos parâmetros `importance_metric` e `importance_gain_thr`.
