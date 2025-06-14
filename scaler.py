@@ -461,31 +461,88 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         return pd.DataFrame.from_dict(self.report_, orient="index")
 
     def _cv_score(self, X: np.ndarray, y: pd.Series) -> float:
-        """Calcula score de CV usando XGBoost."""
+        """
+        Calcula score de validação cruzada com XGBoost.
+
+        Regras:
+        -------
+        • Classificação binária/multiclasse (≤ 20 classes):
+            – Se taxa de evento < 30 %, ajusta `scale_pos_weight` para balancear.
+            – Métrica: ROC-AUC.
+        • Regressão:
+            – Métrica: RMSE (negativa para que valores maiores = melhor).
+        """
+        import numpy as np
         import xgboost as xgb
         from sklearn.model_selection import StratifiedKFold, KFold, cross_val_score
 
-        if y.dtype.kind in {"i", "u", "b"} and np.unique(y).size <= 20:
+        # ------------------------------------------------------------------ #
+        # Detecta se é classificação (≤ 20 classes inteiras/booleanas)
+        # ------------------------------------------------------------------ #
+        is_classif = y.dtype.kind in {"i", "u", "b"} and np.unique(y).size <= 20
+
+        if is_classif:
+            # ---------- configuração de balanceamento --------------------- #
+            if np.unique(y).size == 2:  # binário
+                event_rate = float(np.mean(y == 1))
+                # taxa < 30 % → usa scale_pos_weight
+                scale_pos_weight = (1 - event_rate) / event_rate if event_rate < 0.30 else 1.0
+            else:  # multiclasse: deixa XGBoost lidar internamente
+                scale_pos_weight = 1.0
+
             model = xgb.XGBClassifier(
                 random_state=self.random_state,
                 n_estimators=150,
                 max_depth=4,
                 learning_rate=0.1,
                 eval_metric="logloss",
+                scale_pos_weight=scale_pos_weight,
+                n_jobs=self.n_jobs,
             )
-            cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=self.random_state)
-            scores = cross_val_score(model, X, y, cv=cv, scoring="roc_auc")
-            return float(scores.mean())
-        else:
-            model = xgb.XGBRegressor(
+
+            cv = StratifiedKFold(
+                n_splits=3,
+                shuffle=True,
                 random_state=self.random_state,
-                n_estimators=150,
-                max_depth=4,
-                learning_rate=0.1,
             )
-            cv = KFold(n_splits=3, shuffle=True, random_state=self.random_state)
-            scores = cross_val_score(model, X, y, cv=cv, scoring="neg_root_mean_squared_error")
+
+            scores = cross_val_score(
+                model,
+                X,
+                y,
+                cv=cv,
+                scoring="roc_auc",
+                n_jobs=self.n_jobs,
+            )
             return float(scores.mean())
+
+        # ------------------------------------------------------------------ #
+        # Regressão
+        # ------------------------------------------------------------------ #
+        model = xgb.XGBRegressor(
+            random_state=self.random_state,
+            n_estimators=150,
+            max_depth=4,
+            learning_rate=0.1,
+            n_jobs=self.n_jobs,
+        )
+
+        cv = KFold(
+            n_splits=3,
+            shuffle=True,
+            random_state=self.random_state,
+        )
+
+        scores = cross_val_score(
+            model,
+            X,
+            y,
+            cv=cv,
+            scoring="neg_root_mean_squared_error",
+            n_jobs=self.n_jobs,
+        )
+        return float(scores.mean())
+
 
     def plot_histograms(
         self,
