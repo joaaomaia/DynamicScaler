@@ -23,7 +23,7 @@ Ele combina testes estatísticos (normalidade, skew, curtose) com *optional* **v
 ### Estratégia Auto
 No modo `auto`, o DynamicScaler monta uma fila de candidatos baseada na normalidade dos dados. Cada scaler é testado em sequência e só é aceito se:
 1. Desvio-padrão, IQR e nº de valores únicos pós-transformação superam `min_post_*`.
-2. O skew diminui em relação ao baseline.
+2. O skew (assimetria) diminui em relação ao baseline.
 3. A curtose não piora e fica abaixo de `kurtosis_thr`.
 4. Se exigido, o ganho de importância medido via `evaluation_mode` é ≥ `importance_gain_thr`.
 Se todos falharem, a coluna segue sem transformação.
