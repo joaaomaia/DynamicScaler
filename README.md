@@ -95,6 +95,14 @@ df_scaled = scaler.transform(df_full, return_df=True)
     | Colunas preservadas sem escalonamento.
  |
 | `logger`       | `logging.Logger` \| `None`                                        | Logger customizado; se `None`, cria logger padrão.                        |
+| `extra_validation` | `bool`
+    | Habilita validacao preditiva para todos os candidatos. |
+| `allow_minmax` | `bool`
+    | Inclui `MinMaxScaler` na fila quando `True`. |
+| `kurtosis_thr` | `float`
+    | Limite absoluto de curtose apos a transformacao (`10.0`). |
+| `cv_gain_thr` | `float`
+    | Ganho minimo de score de CV (`0.002`). |
 
 ---
 ## Fluxo da estratégia `auto`
@@ -116,6 +124,23 @@ flowchart TD
     ROBUSTEZ -- Sim --> ROBUSTO[RobustScaler]
     ROBUSTEZ -- Nao --> MINMAX[MinMaxScaler]
 ```
+
+### Validação em duas etapas
+
+```mermaid
+flowchart TD
+    A[Estatísticas básicas] --> B{Skew reduzido?}
+    B -- Não --> R[Rejeita]
+    B -- Sim --> C{Kurtose reduzida?}
+    C -- Não --> R
+    C -- Sim --> D{CV extra?}
+    D -- Não --> Aceita
+    D -- Sim --> E{Ganho >= thr?}
+    E -- Sim --> Aceita
+    E -- Não --> R
+```
+
+O `MinMaxScaler` só participa se `allow_minmax=True` e não estiver em `ignore_scalers`. A etapa de cross-validation preditiva pode aumentar o tempo de execução devido ao treinamento repetido do `XGBoost`.
 
 ## 🤝 Contribuições
 

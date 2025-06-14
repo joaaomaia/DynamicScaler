@@ -50,7 +50,7 @@ def test_collapse_rejected():
         min_post_std=1.5, scoring=lambda _, arr: arr.std(), random_state=42
     )
     scaler.fit(df)
-    assert scaler.report_["a"]["chosen_scaler"] == "RobustScaler"
+    assert scaler.report_["a"]["chosen_scaler"] == "None"
 
 
 def test_ignore_scalers():
@@ -75,4 +75,4 @@ def test_scoring_improves():
     df = pd.DataFrame({"a": np.exp(np.random.normal(size=100))})
     scaler = DynamicScaler(random_state=0)
     scaler.fit(df)
-    assert scaler.report_["a"]["chosen_scaler"] == "PowerTransformer"
+    assert scaler.report_["a"]["chosen_scaler"] == "QuantileTransformer"

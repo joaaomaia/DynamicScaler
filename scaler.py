@@ -26,7 +26,7 @@ from sklearn.preprocessing import (
     PowerTransformer,
 )
 
-__version__ = "0.3.2"
+__version__ = "0.4.0"
 
 
 class DynamicScaler(BaseEstimator, TransformerMixin):
@@ -91,6 +91,10 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         scoring: Callable | None = None,
         ignore_scalers: list[str] | None = None,
         extra_scalers: list[BaseEstimator] | None = None,
+        extra_validation: bool = False,
+        allow_minmax: bool = True,
+        kurtosis_thr: float = 10.0,
+        cv_gain_thr: float = 0.002,
     ):
         self.strategy = strategy.lower() if strategy else None
         self.serialize = serialize
@@ -116,6 +120,10 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
             self.scoring = scoring
         self.ignore_scalers = set(ignore_scalers or [])
         self.extra_scalers = extra_scalers or []
+        self.extra_validation = extra_validation
+        self.allow_minmax = allow_minmax
+        self.kurtosis_thr = kurtosis_thr
+        self.cv_gain_thr = cv_gain_thr
 
         self.scalers_: dict[str, BaseEstimator] | None = None
         self.report_: dict[str, dict] = {}  # estatísticas por coluna
@@ -136,7 +144,9 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
     # ------------------------------------------------------------------
     # MÉTODO INTERNO PARA ESTRATÉGIA AUTO
     # ------------------------------------------------------------------
-    def _choose_auto(self, x: pd.Series, *, stats_callback: Callable | None = None):
+    def _choose_auto(
+        self, x: pd.Series, y: pd.Series | None = None, *, stats_callback: Callable | None = None
+    ):
         """Avalia uma fila curta de scalers e retorna o primeiro que passa na validação."""
 
         sample = x.dropna().astype(float)
@@ -153,6 +163,8 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         val = sample.sample(n_val, random_state=self.random_state)
         train = sample.drop(index=val.index)
         baseline_score = self.scoring(None, val.values)
+        baseline_kurt = float(kurtosis(val.values, nan_policy="omit"))
+        baseline_cv: float | None = None
 
         # --------------------------------------------------------------
         # Teste de normalidade (Shapiro-Wilk)
@@ -167,32 +179,35 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         normal = shapiro_p >= self.shapiro_p_val
 
         queue: list[BaseEstimator] = []
-        if normal:
+        if normal and "StandardScaler" not in self.ignore_scalers:
             queue.append(StandardScaler())
         pt_args = {}
         if self.power_method != "auto":
             pt_args["method"] = self.power_method
-        queue.extend(
-            [
-                PowerTransformer(**pt_args),
-                QuantileTransformer(
-                    output_distribution="normal", random_state=self.random_state
-                ),
-                RobustScaler(),
-                MinMaxScaler(),
-            ]
-        )
+        default_q = [
+            PowerTransformer(**pt_args),
+            QuantileTransformer(
+                output_distribution="normal", random_state=self.random_state
+            ),
+            RobustScaler(),
+        ]
+        if self.allow_minmax:
+            default_q.append(MinMaxScaler())
+        for sc in default_q:
+            if sc.__class__.__name__ not in self.ignore_scalers:
+                queue.append(sc)
         if self.extra_scalers:
-            queue.extend(self.extra_scalers)
+            for sc in self.extra_scalers:
+                if sc.__class__.__name__ not in self.ignore_scalers:
+                    queue.append(sc)
 
         tried: list[str] = []
         for scaler in queue:
             name = scaler.__class__.__name__
-            if name in self.ignore_scalers:
-                continue
             tried.append(name)
             scaler.fit(train.values.reshape(-1, 1))
             tr = scaler.transform(train.values.reshape(-1, 1)).ravel()
+            cand_cv = float("nan")
             post_std = float(np.std(tr))
             post_iqr = float(np.percentile(tr, 75) - np.percentile(tr, 25))
             post_n_unique = int(len(np.unique(tr)))
@@ -204,21 +219,37 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
                 continue
             val_tr = scaler.transform(val.values.reshape(-1, 1)).ravel()
             skew_test = float(self.scoring(None, val_tr))
-            if abs(skew_test) < abs(baseline_score):
-                report = {
-                    "chosen_scaler": name,
-                    "validation_stats": {
-                        "post_std": post_std,
-                        "post_iqr": post_iqr,
-                        "post_n_unique": post_n_unique,
-                        "skew_test": skew_test,
-                    },
-                    "ignored": list(self.ignore_scalers),
-                    "candidates_tried": tried,
-                }
-                if stats_callback:
-                    stats_callback(x.name, report)
-                return scaler, report
+            if abs(skew_test) >= abs(baseline_score):
+                continue
+            kurt_test = float(kurtosis(val_tr, nan_policy="omit"))
+            if abs(kurt_test) >= abs(baseline_kurt) or abs(kurt_test) > self.kurtosis_thr:
+                continue
+            need_cv = self.extra_validation or name == "MinMaxScaler"
+            if need_cv:
+                if y is None:
+                    continue
+                y_train = y.loc[train.index]
+                if baseline_cv is None:
+                    baseline_cv = self._cv_score(train.values.reshape(-1, 1), y_train)
+                cand_cv = self._cv_score(tr.reshape(-1, 1), y_train)
+                if cand_cv < baseline_cv + self.cv_gain_thr:
+                    continue
+            report = {
+                "chosen_scaler": name,
+                "validation_stats": {
+                    "post_std": post_std,
+                    "post_iqr": post_iqr,
+                    "post_n_unique": post_n_unique,
+                    "skew_test": skew_test,
+                    "kurtosis_test": kurt_test,
+                    "cv_score": float(cand_cv) if need_cv else float("nan"),
+                },
+                "ignored": list(self.ignore_scalers),
+                "candidates_tried": tried,
+            }
+            if stats_callback:
+                stats_callback(x.name, report)
+            return scaler, report
 
         return None, {
             "chosen_scaler": "None",
@@ -227,6 +258,8 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
                 "post_iqr": float("nan"),
                 "post_n_unique": 0,
                 "skew_test": float(baseline_score),
+                "kurtosis_test": float(baseline_kurt),
+                "cv_score": float(baseline_cv) if baseline_cv is not None else float("nan"),
             },
             "ignored": list(self.ignore_scalers),
             "candidates_tried": tried,
@@ -239,6 +272,7 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None, *, stats_callback: Callable | None = None):
         X_df = pd.DataFrame(X)
         num_df = X_df.select_dtypes("number")
+        y_series = None if y is None else pd.Series(y, index=X_df.index)
 
         ignore_in_data: list[str] = []
         if self.ignore_cols:
@@ -272,7 +306,7 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         for col in num_df.columns:
             if self.strategy == "auto":
                 scaler, report = self._choose_auto(
-                    num_df[col], stats_callback=stats_callback
+                    num_df[col], y_series, stats_callback=stats_callback
                 )
                 if scaler is not None:
                     scaler.fit(num_df[[col]])
@@ -306,6 +340,7 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         self.feature_names_in_ = np.array(list(self.scalers_.keys()))
         self.n_features_in_ = len(self.feature_names_in_)
         self.columns_hash_ = hashlib.md5(",".join(self.scalers_).encode()).hexdigest()
+        self.selected_cols_ = [c for c, r in self.report_.items() if r.get("chosen_scaler") != "None"]
 
         if self.serialize:
             self.save(self.save_path)
@@ -425,6 +460,33 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         """Devolve o relatório de métricas/decisões como DataFrame."""
         return pd.DataFrame.from_dict(self.report_, orient="index")
 
+    def _cv_score(self, X: np.ndarray, y: pd.Series) -> float:
+        """Calcula score de CV usando XGBoost."""
+        import xgboost as xgb
+        from sklearn.model_selection import StratifiedKFold, KFold, cross_val_score
+
+        if y.dtype.kind in {"i", "u", "b"} and np.unique(y).size <= 20:
+            model = xgb.XGBClassifier(
+                random_state=self.random_state,
+                n_estimators=150,
+                max_depth=4,
+                learning_rate=0.1,
+                eval_metric="logloss",
+            )
+            cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=self.random_state)
+            scores = cross_val_score(model, X, y, cv=cv, scoring="roc_auc")
+            return float(scores.mean())
+        else:
+            model = xgb.XGBRegressor(
+                random_state=self.random_state,
+                n_estimators=150,
+                max_depth=4,
+                learning_rate=0.1,
+            )
+            cv = KFold(n_splits=3, shuffle=True, random_state=self.random_state)
+            scores = cross_val_score(model, X, y, cv=cv, scoring="neg_root_mean_squared_error")
+            return float(scores.mean())
+
     def plot_histograms(
         self,
         original_df: pd.DataFrame,
@@ -520,9 +582,10 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
     def save(self, path: str | pathlib.Path | None = None):
         """Serializa scalers + relatório + metadados."""
         path = pathlib.Path(path or self.save_path)
+        scalers_to_save = {c: self.scalers_[c] for c in getattr(self, "selected_cols_", self.scalers_)}
         joblib.dump(
             {
-                "scalers": self.scalers_,
+                "scalers": scalers_to_save,
                 "report": self.report_,
                 "strategy": self.strategy,
                 "random_state": self.random_state,
@@ -553,5 +616,6 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
                 sklearn.__version__,
             )
         self.columns_hash_ = expected_hash
+        self.selected_cols_ = [c for c, r in self.report_.items() if r.get("chosen_scaler") != "None"]
         self.logger.info("Scalers carregados de %s", path)
         return self
