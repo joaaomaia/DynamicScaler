@@ -6,17 +6,18 @@ Ele combina testes estatísticos (normalidade, skew, curtose) com *optional* **v
 ---
 ## ✨ Principais Características
 
-|---------|-----------|
-| **Estratégias** | `'auto'`, `'standard'`, `'robust'`, `'minmax'`, `'quantile'`, `None` (passthrough). |
-| **Teste de normalidade** | `StandardScaler` só é considerado se o p‑valor do Shapiro‑Wilk ≥ `shapiro_p_val`. |
-| **Fila inteligente** | `PowerTransformer → QuantileTransformer → RobustScaler → MinMaxScaler*` (*somente se `allow_minmax=True`). |
-| **Validação estatística** | Checa pós‑transformação: desvio‑padrão, IQR e nº de valores únicos. |
-| **Teste secundário** | Compara **kurtosis** à linha de base e a `kurtosis_thr`. |
-| **Validação de importância** | Se `extra_validation=True` *ou* para `MinMaxScaler`, avalia ganho de importância via `importance_metric` e exige aumento ≥ `importance_gain_thr`. |
-| **Avaliação preditiva** | `evaluation_mode` define se `LogisticRegression`, `Ridge` e `XGBoost` participam da validação. |
-| **Auditável** | `report_as_df()` mostra métricas, candidatos testados, motivo de rejeição. |
-| **Visual** | `plot_histograms()` compara distribuições antes/depois e exibe o scaler usado. |
-| **Serialização segura** | Só salva scalers aprovados; usa hash de colunas para evitar mismatch em produção. |
+| Característica               | Descrição |
+|-----------------------------|-----------|
+| **Estratégias**             | `'auto'`, `'standard'`, `'robust'`, `'minmax'`, `'quantile'`, `None` (passthrough). |
+| **Teste de normalidade**    | `StandardScaler` só é considerado se o p‑valor do teste de Shapiro‑Wilk ≥ `shapiro_p_val`. |
+| **Fila inteligente**        | Ordem preferencial: `PowerTransformer → QuantileTransformer → RobustScaler → MinMaxScaler` (*se* `allow_minmax=True`). |
+| **Validação estatística**   | Avalia desvio padrão, IQR e número de valores únicos após transformação. |
+| **Teste secundário**        | Compara a **kurtosis** com a linha de base e com o limiar `kurtosis_thr`. |
+| **Validação de importância**| Aplicada se `extra_validation=True` *ou* para `MinMaxScaler`. Exige aumento ≥ `importance_gain_thr` usando `importance_metric`. |
+| **Avaliação preditiva**     | O parâmetro `evaluation_mode` define se `LogisticRegression`, `Ridge` e `XGBoost` são usados na validação de importância. |
+| **Auditável**               | O método `report_as_df()` exibe métricas, candidatos testados e motivos de escolha ou rejeição. |
+| **Visualização**            | O método `plot_histograms()` compara distribuições antes e depois da transformação, indicando o scaler aplicado. |
+| **Serialização segura**     | Salva apenas scalers aprovados, com hash das colunas para evitar erros de compatibilidade em produção. |
 
 ---
 ### Estratégia Auto
