@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.0
+- Parâmetro `evaluation_mode` seleciona modelos linear/não-linear para validação.
+- Importância por coeficiente adicionada e suporte a LogisticRegression/Ridge.
+
 ## 0.5.1
 - Campo `reason` populado para scalers aceitos com flags de validação.
 - Tabela de colunas do report atualizada.

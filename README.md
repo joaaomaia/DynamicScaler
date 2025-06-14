@@ -52,12 +52,19 @@ scaler_cv = DynamicScaler(
     allow_minmax=True,        # deixa MinMax entrar
     importance_gain_thr=0.10, # exige aumento de 10% de importância
     importance_metric="shap",
+    evaluation_mode="linear", # usa modelos lineares
     random_state=42
 )
 
 scaler_cv.fit(df_train[num_cols], y_train)
 X_test_scaled = scaler_cv.transform(df_test[num_cols], return_df=True)
 ```
+
+> ⚠ **Tip**
+> Para modelos lineares (`evaluation_mode="linear"` ou `"both"`) o
+> `DynamicScaler` usa `shap.LinearExplainer` automaticamente para obter
+> importâncias consistentes. Se preferir, defina `importance_metric="gain"`
+> ou `"coef"`.
 
 ---
 
@@ -143,6 +150,7 @@ flowchart TD
 | `allow_minmax` | `True` | Permite que `MinMaxScaler` entre na fila. |
 | `importance_metric` | `'shap'` | Métrica de importância: `'shap'`, `'gain'` ou função custom. |
 | `importance_gain_thr` | `0.10` | Aumento relativo mínimo na importância da feature. |
+| `evaluation_mode` | `'nonlinear'` | `'linear'`, `'nonlinear'` ou `'both'` para escolher o(s) modelo(s) de validação. |
 | `cv_gain_thr` | `0.002` | (deprecated) mapeado para `importance_gain_thr`. |
 | `ignore_scalers` | `[]` | Lista de scalers a serem ignorados de antemão. |
 

@@ -14,7 +14,7 @@ def _base_df():
 
 
 def _patch_common(monkeypatch, imp_values):
-    def fake_fit(self, X, y):
+    def fake_fit(self, X, y, kind):
         return None
 
     calls = {"n": 0}
@@ -26,7 +26,7 @@ def _patch_common(monkeypatch, imp_values):
     def fake_kurt(arr, **_):
         return 10 if arr.max() > 1 else 0
 
-    monkeypatch.setattr(DynamicScaler, "_fit_xgb", fake_fit)
+    monkeypatch.setattr(DynamicScaler, "_fit_model", fake_fit)
     monkeypatch.setattr(DynamicScaler, "_feature_importance", fake_imp)
     monkeypatch.setattr("scaler.kurtosis", fake_kurt)
 
@@ -58,10 +58,10 @@ def test_importance_no_gain(monkeypatch):
 def test_custom_metric_callable(monkeypatch):
     df, y = _base_df()
 
-    def fake_fit(self, X, y):
+    def fake_fit(self, X, y, kind):
         return None
 
-    monkeypatch.setattr(DynamicScaler, "_fit_xgb", fake_fit)
+    monkeypatch.setattr(DynamicScaler, "_fit_model", fake_fit)
     def fake_kurt(arr, **_):
         return 10 if arr.max() > 1 else 0
 
