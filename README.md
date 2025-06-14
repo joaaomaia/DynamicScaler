@@ -11,6 +11,7 @@ Selecione e aplique dinamicamente o scaler mais adequado para cada feature numé
 - **Compatível com `scikit-learn` Pipelines**, facilitando integração em fluxos de trabalho.
 - **Serialização** automática de scalers e relatórios em arquivo `.pkl` (`save` / `load`).
 - **Relatórios** via DataFrame (`report_as_df`) e **visualizações** de histogramas antes/depois (`plot_histograms`).
+- Ao plotar histogramas, se a coluna não for escalonada o título exibe "Nenhum".
 - **Validação rápida** com amostra holdout e fallback entre scalers.
 - **`ignore_scalers`** para pular transformadores indesejados.
 

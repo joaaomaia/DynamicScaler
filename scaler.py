@@ -23,7 +23,7 @@ from sklearn.preprocessing import (
     PowerTransformer,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 class DynamicScaler(BaseEstimator, TransformerMixin):
     """
@@ -351,6 +351,9 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         """
         Plota histogramas lado a lado (antes/depois do escalonamento) para uma ou mais variáveis.
 
+        O título do histograma indica o scaler aplicado usando ``chosen_scaler``
+        registrado no relatório.
+
         Parâmetros
         ----------
         original_df : pd.DataFrame
@@ -374,7 +377,12 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
                 self.logger.warning("Variável '%s' não foi tratada no fit. Pulando...", feature)
                 continue
 
-            scaler_nome = self.report_.get(feature, {}).get("scaler", "Desconhecido")
+            scaler_nome = self.report_.get(feature, {}).get("chosen_scaler", "Nenhum")
+            if scaler_nome is None or scaler_nome == "None":
+                scaler_nome = "Nenhum"
+            self.logger.info(
+                "Plotando histograma de %s — scaler = %s", feature, scaler_nome
+            )
 
             cols = 3 if show_qq and self.plot_backend == "matplotlib" else 2
             plt.figure(figsize=(6 * cols, 4))
