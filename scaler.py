@@ -26,7 +26,7 @@ from sklearn.preprocessing import (
     PowerTransformer,
 )
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 
 
 class DynamicScaler(BaseEstimator, TransformerMixin):
@@ -62,6 +62,10 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
 
     logger : logging.Logger | None
         Logger customizado; se None, cria logger básico.
+
+    evaluation_mode : {'linear', 'nonlinear', 'both'}, default='nonlinear'
+        Define se a validação de importância usa apenas modelos lineares,
+        apenas não-lineares ou uma média de ambos.
     """
 
     # ------------------------------------------------------------------
@@ -98,6 +102,7 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         *,
         importance_metric: str | Callable = "shap",
         importance_gain_thr: float = 0.10,
+        evaluation_mode: str = "nonlinear",
     ):
         self.strategy = strategy.lower() if strategy else None
         self.serialize = serialize
@@ -129,6 +134,7 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         self.cv_gain_thr = cv_gain_thr
         self.importance_metric = importance_metric
         self.importance_gain_thr = importance_gain_thr
+        self.evaluation_mode = evaluation_mode.lower()
 
         if cv_gain_thr != 0.002 and importance_metric == "shap" and importance_gain_thr == 0.10:
             import warnings
@@ -176,7 +182,7 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         train = sample.drop(index=val.index)
         baseline_score = self.scoring(None, val.values)
         baseline_kurt = float(kurtosis(val.values, nan_policy="omit"))
-        baseline_imp: float | None = None
+        baseline_imp: dict[str, float] | None = None
 
         # --------------------------------------------------------------
         # Teste de normalidade (Shapiro-Wilk)
@@ -214,6 +220,14 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
                     queue.append(sc)
 
         tried: list[str] = []
+        is_classif = y is not None and y.dtype.kind in {"i", "u", "b"} and np.unique(y).size <= 20
+        if self.evaluation_mode == "linear":
+            models = ["logreg"] if is_classif else ["ridge"]
+        elif self.evaluation_mode == "both":
+            models = ["logreg", "xgb"] if is_classif else ["ridge", "xgb"]
+        else:
+            models = ["xgb"]
+
         for scaler in queue:
             name = scaler.__class__.__name__
             tried.append(name)
@@ -242,11 +256,17 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
                     continue
                 y_train = y.loc[train.index]
                 if baseline_imp is None:
-                    baseline_model = self._fit_xgb(train.values.reshape(-1, 1), y_train)
-                    baseline_imp = self._feature_importance(baseline_model, train.values.reshape(-1, 1))
-                cand_model = self._fit_xgb(tr.reshape(-1, 1), y_train)
-                cand_imp = self._feature_importance(cand_model, tr.reshape(-1, 1))
-                if cand_imp < baseline_imp * (1 + self.importance_gain_thr):
+                    baseline_imp = {}
+                    for k in models:
+                        bm = self._fit_model(train.values.reshape(-1, 1), y_train, k)
+                        baseline_imp[k] = self._feature_importance(bm, train.values.reshape(-1, 1))
+                cand_vals = []
+                for k in models:
+                    cm = self._fit_model(tr.reshape(-1, 1), y_train, k)
+                    cand_vals.append(self._feature_importance(cm, tr.reshape(-1, 1)))
+                cand_imp = float(np.mean(cand_vals))
+                base_imp = float(np.mean([baseline_imp[k] for k in models]))
+                if cand_imp < base_imp * (1 + self.importance_gain_thr):
                     continue
             report = {
                 "chosen_scaler": name,
@@ -256,7 +276,7 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
                     "post_n_unique": post_n_unique,
                     "skew_test": skew_test,
                     "kurtosis_test": kurt_test,
-                    "importance_base": float(baseline_imp) if need_imp else float("nan"),
+                    "importance_base": float(np.mean(list(baseline_imp.values()))) if (need_imp and baseline_imp) else float("nan"),
                     "importance_cand": float(cand_imp) if need_imp else float("nan"),
                 },
                 "ignored": list(self.ignore_scalers),
@@ -284,7 +304,7 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
                 "post_n_unique": 0,
                 "skew_test": float(baseline_score),
                 "kurtosis_test": float(baseline_kurt),
-                "importance_base": float(baseline_imp) if baseline_imp is not None else float("nan"),
+                "importance_base": float(np.mean(list(baseline_imp.values()))) if baseline_imp is not None else float("nan"),
                 "importance_cand": float("nan"),
             },
             "ignored": list(self.ignore_scalers),
@@ -487,133 +507,162 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         return pd.DataFrame.from_dict(self.report_, orient="index")
 
     def _cv_score(self, X: np.ndarray, y: pd.Series) -> float:
-        """
-        Calcula score de validação cruzada com XGBoost.
-
-        Regras:
-        -------
-        • Classificação binária/multiclasse (≤ 20 classes):
-            – Se taxa de evento < 30 %, ajusta `scale_pos_weight` para balancear.
-            – Métrica: ROC-AUC.
-        • Regressão:
-            – Métrica: RMSE (negativa para que valores maiores = melhor).
-        """
+        """Calcula score de validação cruzada usando o(s) modelo(s) indicado(s)."""
         import numpy as np
         import xgboost as xgb
         from sklearn.model_selection import StratifiedKFold, KFold, cross_val_score
+        from sklearn.linear_model import LogisticRegression, Ridge
+        import numpy as np
+        import numpy as np
+        import numpy as np
 
         # ------------------------------------------------------------------ #
         # Detecta se é classificação (≤ 20 classes inteiras/booleanas)
         # ------------------------------------------------------------------ #
         is_classif = y.dtype.kind in {"i", "u", "b"} and np.unique(y).size <= 20
 
-        if is_classif:
-            # ---------- configuração de balanceamento --------------------- #
-            if np.unique(y).size == 2:  # binário
-                event_rate = float(np.mean(y == 1))
-                # taxa < 30 % → usa scale_pos_weight
-                scale_pos_weight = (1 - event_rate) / event_rate if event_rate < 0.30 else 1.0
-            else:  # multiclasse: deixa XGBoost lidar internamente
-                scale_pos_weight = 1.0
-
-            model = xgb.XGBClassifier(
-                random_state=self.random_state,
-                n_estimators=150,
-                max_depth=4,
-                learning_rate=0.1,
-                eval_metric="logloss",
-                scale_pos_weight=scale_pos_weight,
-                n_jobs=self.n_jobs,
-            )
-
-            cv = StratifiedKFold(
-                n_splits=3,
-                shuffle=True,
-                random_state=self.random_state,
-            )
-
-            scores = cross_val_score(
-                model,
-                X,
-                y,
-                cv=cv,
-                scoring="roc_auc",
-                n_jobs=self.n_jobs,
-            )
-            return float(scores.mean())
-
-        # ------------------------------------------------------------------ #
-        # Regressão
-        # ------------------------------------------------------------------ #
-        model = xgb.XGBRegressor(
-            random_state=self.random_state,
-            n_estimators=150,
-            max_depth=4,
-            learning_rate=0.1,
-            n_jobs=self.n_jobs,
-        )
-
-        cv = KFold(
-            n_splits=3,
-            shuffle=True,
-            random_state=self.random_state,
-        )
-
-        scores = cross_val_score(
-            model,
-            X,
-            y,
-            cv=cv,
-            scoring="neg_root_mean_squared_error",
-            n_jobs=self.n_jobs,
-        )
-        return float(scores.mean())
-
-    def _fit_xgb(self, X_arr: np.ndarray, y_arr: pd.Series):
-        """Ajusta um modelo XGBoost para cálculo de importância."""
-        import numpy as np
-        import xgboost as xgb
-
-        is_classif = y_arr.dtype.kind in {"i", "u", "b"} and np.unique(y_arr).size <= 20
-        if is_classif:
-            if np.unique(y_arr).size == 2:
-                event_rate = float(np.mean(y_arr == 1))
-                scale_pos_weight = (1 - event_rate) / event_rate if event_rate < 0.30 else 1.0
+        def score_kind(kind: str) -> float:
+            if kind == "xgb":
+                if is_classif:
+                    if np.unique(y).size == 2:
+                        event_rate = float(np.mean(y == 1))
+                        scale_pos_weight = (1 - event_rate) / event_rate if event_rate < 0.30 else 1.0
+                    else:
+                        scale_pos_weight = 1.0
+                    model = xgb.XGBClassifier(
+                        random_state=self.random_state,
+                        n_estimators=150,
+                        max_depth=4,
+                        learning_rate=0.1,
+                        eval_metric="logloss",
+                        scale_pos_weight=scale_pos_weight,
+                        n_jobs=self.n_jobs,
+                    )
+                    cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=self.random_state)
+                    scores = cross_val_score(model, X, y, cv=cv, scoring="roc_auc", n_jobs=self.n_jobs)
+                    return float(scores.mean())
+                else:
+                    model = xgb.XGBRegressor(
+                        random_state=self.random_state,
+                        n_estimators=150,
+                        max_depth=4,
+                        learning_rate=0.1,
+                        n_jobs=self.n_jobs,
+                    )
+                    cv = KFold(n_splits=3, shuffle=True, random_state=self.random_state)
+                    scores = cross_val_score(model, X, y, cv=cv, scoring="neg_root_mean_squared_error", n_jobs=self.n_jobs)
+                    return float(scores.mean())
+            elif kind == "logreg":
+                event_rate = float(np.mean(y == 1)) if np.unique(y).size == 2 else 0.5
+                rare_event = event_rate < 0.30
+                model = LogisticRegression(
+                    penalty="l2",
+                    solver="liblinear",
+                    class_weight="balanced" if rare_event else None,
+                    max_iter=1000,
+                    n_jobs=self.n_jobs,
+                    random_state=self.random_state,
+                )
+                cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=self.random_state)
+                scores = cross_val_score(model, X, y, cv=cv, scoring="roc_auc", n_jobs=self.n_jobs)
+                return float(scores.mean())
+            elif kind == "ridge":
+                model = Ridge(random_state=self.random_state)
+                cv = KFold(n_splits=3, shuffle=True, random_state=self.random_state)
+                scores = cross_val_score(model, X, y, cv=cv, scoring="neg_root_mean_squared_error", n_jobs=self.n_jobs)
+                return float(scores.mean())
             else:
-                scale_pos_weight = 1.0
-            model = xgb.XGBClassifier(
-                random_state=self.random_state,
-                n_estimators=150,
-                max_depth=4,
-                learning_rate=0.1,
-                eval_metric="logloss",
-                scale_pos_weight=scale_pos_weight,
-                n_jobs=self.n_jobs,
-            )
+                raise ValueError(kind)
+
+        if self.evaluation_mode == "linear":
+            kind = "logreg" if is_classif else "ridge"
+            return score_kind(kind)
+        elif self.evaluation_mode == "both":
+            kinds = ["logreg", "xgb"] if is_classif else ["ridge", "xgb"]
+            scores = [score_kind(k) for k in kinds]
+            return float(np.mean(scores))
         else:
-            model = xgb.XGBRegressor(
-                random_state=self.random_state,
-                n_estimators=150,
-                max_depth=4,
-                learning_rate=0.1,
+            return score_kind("xgb")
+
+    def _fit_model(self, X_arr: np.ndarray, y_arr: pd.Series, kind: str):
+        """Ajusta modelo auxiliar para cálculo de importância."""
+        import numpy as np
+
+        if kind == "xgb":
+            import xgboost as xgb
+
+            is_classif = y_arr.dtype.kind in {"i", "u", "b"} and np.unique(y_arr).size <= 20
+            if is_classif:
+                if np.unique(y_arr).size == 2:
+                    event_rate = float(np.mean(y_arr == 1))
+                    scale_pos_weight = (1 - event_rate) / event_rate if event_rate < 0.30 else 1.0
+                else:
+                    scale_pos_weight = 1.0
+                model = xgb.XGBClassifier(
+                    random_state=self.random_state,
+                    n_estimators=150,
+                    max_depth=4,
+                    learning_rate=0.1,
+                    eval_metric="logloss",
+                    scale_pos_weight=scale_pos_weight,
+                    n_jobs=self.n_jobs,
+                )
+            else:
+                model = xgb.XGBRegressor(
+                    random_state=self.random_state,
+                    n_estimators=150,
+                    max_depth=4,
+                    learning_rate=0.1,
+                    n_jobs=self.n_jobs,
+                )
+        elif kind == "logreg":
+            from sklearn.linear_model import LogisticRegression
+
+            event_rate = float(np.mean(y_arr == 1)) if np.unique(y_arr).size == 2 else 0.5
+            rare_event = event_rate < 0.30
+            model = LogisticRegression(
+                penalty="l2",
+                solver="liblinear",
+                class_weight="balanced" if rare_event else None,
+                max_iter=1000,
                 n_jobs=self.n_jobs,
+                random_state=self.random_state,
             )
+        elif kind == "ridge":
+            from sklearn.linear_model import Ridge
+
+            model = Ridge(random_state=self.random_state)
+        else:
+            raise ValueError(f"Unknown model kind: {kind}")
 
         model.fit(X_arr, y_arr)
         return model
 
     def _feature_importance(self, model, X_arr: np.ndarray) -> float:
-        """Calcula importância de feature via SHAP, gain ou callable custom."""
+        """Calcula importância de feature via SHAP, gain, coef ou callable."""
+        from sklearn.linear_model import LogisticRegression, Ridge
+        import numpy as np
+
         if self.importance_metric == "shap":
             import shap
             import numpy as np
 
-            explainer = shap.TreeExplainer(model)
-            shap_vals = explainer.shap_values(X_arr)
-            return float(np.abs(shap_vals).mean())
+            try:
+                if isinstance(model, (LogisticRegression, Ridge)):
+                    explainer = shap.LinearExplainer(model, X_arr, link="identity")
+                else:
+                    explainer = shap.TreeExplainer(model)
+                shap_vals = explainer.shap_values(X_arr)
+                return float(np.abs(shap_vals).mean())
+            except Exception:  # noqa
+                coef = model.coef_.ravel()
+                return float(np.abs(coef).mean())
         elif self.importance_metric == "gain":
             scores = model.get_booster().get_score(importance_type="gain")
             return float(scores.get("f0", 0.0))
+        elif self.importance_metric == "coef":
+            coef = model.coef_.ravel()
+            return float(np.abs(coef).mean())
         else:
             return float(self.importance_metric(model, X_arr))
 

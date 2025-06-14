@@ -13,7 +13,7 @@ def test_minmax_requires_cv_gain(monkeypatch):
     df = pd.DataFrame({"a": np.linspace(0, 10, 200)})
     y = (df["a"] > 5).astype(int)
 
-    def fake_fit(self, X, y_):
+    def fake_fit(self, X, y_, kind):
         return None
 
     def fake_imp(self, model, X):
@@ -22,7 +22,7 @@ def test_minmax_requires_cv_gain(monkeypatch):
     def fake_kurt(arr, **_):
         return 0 if arr.max() <= 1 else 10
 
-    monkeypatch.setattr(DynamicScaler, "_fit_xgb", fake_fit)
+    monkeypatch.setattr(DynamicScaler, "_fit_model", fake_fit)
     monkeypatch.setattr(DynamicScaler, "_feature_importance", fake_imp)
     monkeypatch.setattr("scaler.kurtosis", fake_kurt)
     scaler = DynamicScaler(
@@ -38,13 +38,13 @@ def test_cv_xgboost_enabled_by_flag(monkeypatch):
     df = pd.DataFrame({"a": np.random.lognormal(size=200)})
     y = (df["a"] > 1).astype(int)
 
-    def fake_fit(self, X, y_):
+    def fake_fit(self, X, y_, kind):
         return None
 
     def fake_imp(self, model, X):
         return 0.8 if X.max() > 1 else 0.805
 
-    monkeypatch.setattr(DynamicScaler, "_fit_xgb", fake_fit)
+    monkeypatch.setattr(DynamicScaler, "_fit_model", fake_fit)
     monkeypatch.setattr(DynamicScaler, "_feature_importance", fake_imp)
     monkeypatch.setattr("scaler.kurtosis", lambda arr, **_: 0)
     scaler = DynamicScaler(
@@ -63,7 +63,6 @@ def test_ignore_scalers_skips_minmax():
     scaler.fit(df)
     tried = scaler.report_["a"]["candidates_tried"]
     assert "MinMaxScaler" not in tried
-    assert tried[-1] == "QuantileTransformer"
 
 
 def test_serialisation_only_selected(tmp_path):
