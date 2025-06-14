@@ -8,9 +8,11 @@ Selecione e aplique dinamicamente o scaler mais adequado para cada feature numé
   - `auto`: decide o scaler por coluna usando critérios estatísticos.  
   - `standard`, `robust`, `minmax`, `quantile`: aplica o mesmo scaler a todas as colunas.  
   - `passthrough`: não aplica escalonamento.  
-- **Compatível com `scikit-learn` Pipelines**, facilitando integração em fluxos de trabalho.  
-- **Serialização** automática de scalers e relatórios em arquivo `.pkl` (`save` / `load`).  
+- **Compatível com `scikit-learn` Pipelines**, facilitando integração em fluxos de trabalho.
+- **Serialização** automática de scalers e relatórios em arquivo `.pkl` (`save` / `load`).
 - **Relatórios** via DataFrame (`report_as_df`) e **visualizações** de histogramas antes/depois (`plot_histograms`).
+- **Validação rápida** com amostra holdout e fallback entre scalers.
+- **`ignore_scalers`** para pular transformadores indesejados.
 
 ---
 

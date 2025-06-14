@@ -23,6 +23,8 @@ from sklearn.preprocessing import (
     PowerTransformer,
 )
 
+__version__ = "0.3.0"
+
 class DynamicScaler(BaseEstimator, TransformerMixin):
     """
     Seleciona e aplica dinamicamente o scaler adequado para cada feature numérica.
@@ -69,7 +71,14 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
                  shapiro_n: int = 5000,
                  n_jobs: int = 1,
                  ignore_cols: list[str] | None = None,
-                 logger: logging.Logger | None = None):
+                 logger: logging.Logger | None = None,
+                 min_post_std: float = 1e-3,
+                 min_post_iqr: float = 1e-3,
+                 min_post_unique: int = 2,
+                 validation_fraction: float = 0.1,
+                 scoring: Callable | None = None,
+                 ignore_scalers: list[str] | None = None,
+                 extra_scalers: list[BaseEstimator] | None = None):
         self.strategy = strategy.lower() if strategy else None
         self.serialize = serialize
         self.save_path = pathlib.Path(save_path or "scalers.pkl")
@@ -84,6 +93,16 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         self.shapiro_n = shapiro_n
         self.n_jobs = n_jobs
         self.ignore_cols = set(ignore_cols or [])
+        self.min_post_std = min_post_std
+        self.min_post_iqr = min_post_iqr
+        self.min_post_unique = min_post_unique
+        self.validation_fraction = validation_fraction
+        if scoring is None:
+            self.scoring = lambda _y, arr: stats.skew(np.abs(arr), nan_policy="omit")
+        else:
+            self.scoring = scoring
+        self.ignore_scalers = set(ignore_scalers or [])
+        self.extra_scalers = extra_scalers or []
 
         self.scalers_: dict[str, BaseEstimator] | None = None
         self.report_:  dict[str, dict] = {}      # estatísticas por coluna
@@ -104,74 +123,74 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
     # MÉTODO INTERNO PARA ESTRATÉGIA AUTO
     # ------------------------------------------------------------------
     def _choose_auto(self, x: pd.Series, *, stats_callback: Callable | None = None):
-        """
-        Decide qual scaler empregar (ou nenhum) para a série x.
+        """Avalia uma fila curta de scalers e retorna o primeiro que passa na validação."""
 
-        Retorna
-        -------
-        scaler | None, dict
-            Instância já criada (ainda não fitada) e dicionário de métricas.
-        """
         sample = x.dropna().astype(float)
-
-        # Coluna constante
         if sample.nunique() == 1:
-            return None, dict(reason='constante', scaler='None')
+            return None, {
+                'chosen_scaler': 'None',
+                'reason': 'constante',
+                'validation_stats': {},
+                'ignored': list(self.ignore_scalers),
+                'candidates_tried': []
+            }
 
-        # ---------------- métricas básicas ----------------
-        try:
-            p_val = shapiro(sample.sample(min(self.shapiro_n, len(sample)),
-                                          random_state=self.random_state))[1]
-        except Exception:   # amostra minúscula ou erro numérico
-            p_val = 0.0
+        n_val = max(1, int(len(sample) * self.validation_fraction))
+        val = sample.sample(n_val, random_state=self.random_state)
+        train = sample.drop(index=val.index)
+        baseline_score = self.scoring(None, val.values)
 
-        sk = skew(sample, nan_policy="omit")
-        kt = kurtosis(sample, nan_policy="omit")        # Fisher (0 = normal)
+        queue: list[BaseEstimator] = [
+            PowerTransformer(),
+            QuantileTransformer(output_distribution='normal', random_state=self.random_state),
+            RobustScaler()
+        ]
+        if self.extra_scalers:
+            queue.extend(self.extra_scalers)
 
-        # ---------------- critérios de NÃO escalonar ----------------
-        # (1) variável já em [0,1]
-        if 0.95 <= sample.min() <= sample.max() <= 1.05:
-            return None, dict(p_value=p_val, skew=sk, kurtosis=kt,
-                              reason='já escalada [0-1]', scaler='None')
+        tried: list[str] = []
+        for scaler in queue:
+            name = scaler.__class__.__name__
+            if name in self.ignore_scalers:
+                continue
+            tried.append(name)
+            scaler.fit(train.values.reshape(-1, 1))
+            tr = scaler.transform(train.values.reshape(-1, 1)).ravel()
+            post_std = float(np.std(tr))
+            post_iqr = float(np.percentile(tr, 75) - np.percentile(tr, 25))
+            post_n_unique = int(len(np.unique(tr)))
+            if post_std < self.min_post_std or post_iqr < self.min_post_iqr or post_n_unique < self.min_post_unique:
+                continue
+            val_tr = scaler.transform(val.values.reshape(-1, 1)).ravel()
+            skew_test = float(self.scoring(None, val_tr))
+            if abs(skew_test) < abs(baseline_score):
+                report = {
+                    'chosen_scaler': name,
+                    'validation_stats': {
+                        'post_std': post_std,
+                        'post_iqr': post_iqr,
+                        'post_n_unique': post_n_unique,
+                        'skew_test': skew_test
+                    },
+                    'ignored': list(self.ignore_scalers),
+                    'candidates_tried': tried
+                }
+                if stats_callback:
+                    stats_callback(x.name, report)
+                return scaler, report
 
-        # # (2) praticamente normal
-        # if abs(sk) < 0.05 and abs(kt) < 0.1 and p_val > 0.90:
-        #     return None, dict(p_value=p_val, skew=sk, kurtosis=kt,
-        #                       reason='praticamente normal', scaler='None')
-        
-        # (3) praticamente normal (menos restritivo)
-        if abs(sk) < 0.5 and abs(kt) < 1.0 and p_val > self.shapiro_p_val:
-            return None, dict(p_value=p_val, skew=sk, kurtosis=kt,
-                            reason='aproximadamente normal', scaler='None')
-
-
-        # ---------------- escolha de scaler ----------------
-        if (abs(sk) > self.power_skew_thr and kt <= self.power_kurt_thr and
-                p_val < self.shapiro_p_val):
-            method = self.power_method
-            if method == 'auto':
-                method = 'box-cox' if sample.min() > 0 else 'yeo-johnson'
-            scaler = PowerTransformer(method=method, standardize=True)
-            reason = f"{method} (high skew)"
-        elif p_val >= 0.05 and abs(sk) <= 0.5:
-            scaler = StandardScaler()
-            reason = '≈normal'
-        elif abs(sk) > 3 or kt > 20:
-            scaler = QuantileTransformer(output_distribution='normal',
-                                         random_state=self.random_state)
-            reason = 'assimetria/kurtosis extrema'
-        elif abs(sk) > 0.5:
-            scaler = RobustScaler()
-            reason = 'skew moderado/outliers'
-        else:
-            scaler = MinMaxScaler()
-            reason = 'default'
-
-        stats = dict(p_value=p_val, skew=sk, kurtosis=kt,
-                     reason=reason, scaler=scaler.__class__.__name__)
-        if stats_callback is not None:
-            stats_callback(x.name, stats)
-        return scaler, stats
+        return None, {
+            'chosen_scaler': 'None',
+            'validation_stats': {
+                'post_std': float('nan'),
+                'post_iqr': float('nan'),
+                'post_n_unique': 0,
+                'skew_test': float(baseline_score)
+            },
+            'ignored': list(self.ignore_scalers),
+            'candidates_tried': tried,
+            'reason': 'all_rejected'
+        }
 
     # ------------------------------------------------------------------
     # API FIT
@@ -179,152 +198,57 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None, *, stats_callback: Callable | None = None):
         X_df = pd.DataFrame(X)
         num_df = X_df.select_dtypes("number")
-        ignore_in_data = []
+
+        ignore_in_data: list[str] = []
         if self.ignore_cols:
             ignore_in_data = list(set(self.ignore_cols) & set(num_df.columns))
             if ignore_in_data:
                 self.logger.info("Ignoring columns (no scaling): %s", ignore_in_data)
                 num_df = num_df.drop(columns=ignore_in_data)
         self.ignored_cols_ = ignore_in_data
+
         non_numeric = set(X_df.columns) - set(num_df.columns)
         if non_numeric:
             self.logger.warning("Ignoring non-numeric columns: %s", list(non_numeric))
-        X_df = num_df
-        if self.missing_strategy == 'drop':
-            X_df = X_df.dropna()
-        self.dtypes_ = X_df.dtypes.to_dict()
 
-        if self.strategy not in {'auto', 'standard', 'robust',
-                                 'minmax', 'quantile', None}:
+        if self.missing_strategy == 'drop':
+            num_df = num_df.dropna()
+
+        self.dtypes_ = num_df.dtypes.to_dict()
+
+        if self.strategy not in {'auto', 'standard', 'robust', 'minmax', 'quantile', None}:
             raise ValueError(f"strategy '{self.strategy}' não suportada.")
 
         self.scalers_ = {}
 
-        def _process(col):
+        for col in num_df.columns:
             if self.strategy == 'auto':
-                scaler, stats = self._choose_auto(X_df[col], stats_callback=stats_callback)
+                scaler, report = self._choose_auto(num_df[col], stats_callback=stats_callback)
+                if scaler is not None:
+                    scaler.fit(num_df[[col]])
             elif self.strategy == 'standard':
-                scaler = StandardScaler(); stats = dict(reason='global-standard', scaler='StandardScaler')
+                scaler = StandardScaler().fit(num_df[[col]])
+                report = {'chosen_scaler': 'StandardScaler', 'reason': 'global-standard'}
             elif self.strategy == 'robust':
-                scaler = RobustScaler(); stats = dict(reason='global-robust', scaler='RobustScaler')
+                scaler = RobustScaler().fit(num_df[[col]])
+                report = {'chosen_scaler': 'RobustScaler', 'reason': 'global-robust'}
             elif self.strategy == 'minmax':
-                scaler = MinMaxScaler(); stats = dict(reason='global-minmax', scaler='MinMaxScaler')
+                scaler = MinMaxScaler().fit(num_df[[col]])
+                report = {'chosen_scaler': 'MinMaxScaler', 'reason': 'global-minmax'}
             elif self.strategy == 'quantile':
-                scaler = QuantileTransformer(output_distribution='normal', random_state=self.random_state)
-                stats = dict(reason='global-quantile', scaler='QuantileTransformer')
+                scaler = QuantileTransformer(output_distribution='normal', random_state=self.random_state).fit(num_df[[col]])
+                report = {'chosen_scaler': 'QuantileTransformer', 'reason': 'global-quantile'}
             else:
-                scaler = None; stats = dict(reason='passthrough', scaler='None')
-
-            fill_value = None
-            if self.missing_strategy == 'median':
-                fill_value = X_df[col].median()
-            elif self.missing_strategy == 'mean':
-                fill_value = X_df[col].mean()
-            elif self.missing_strategy == 'constant':
-                fill_value = 0
-            if fill_value is not None:
-                X_df[col] = X_df[col].fillna(fill_value)
-                stats['fill_value'] = fill_value
-
-            if scaler is not None:
-                scaler.fit(X_df[[col]])
-                if isinstance(scaler, PowerTransformer):
-                    transformed = scaler.transform(X_df[[col]])
-                    post_sk = skew(transformed.ravel(), nan_policy="omit")
-                    post_kt = kurtosis(transformed.ravel(), nan_policy="omit")
-                    stats['post_skew'] = post_sk
-                    stats['post_kurtosis'] = post_kt
-                    self.stats_[col] = {
-                        'pre_skew': stats.get('skew'),
-                        'pre_kurt': stats.get('kurtosis'),
-                        'post_skew': post_sk,
-                        'post_kurt': post_kt,
-                    }
-            return col, scaler, stats
-
-        if self.n_jobs == 1:
-            results = [_process(col) for col in X_df.columns]
-        else:
-            results = Parallel(n_jobs=self.n_jobs)(delayed(_process)(col) for col in X_df.columns)
-
-        for col, scaler, stats in results:
-            self.scalers_[col] = scaler
-            self.report_[col] = stats
-
-            self.logger.info(
-                "Coluna '%s' → %s (p=%.3f, skew=%.2f, kurt=%.1f) | motivo: %s",
-                col, stats.get('scaler'),
-                stats.get('p_value', np.nan),
-                stats.get('skew',     np.nan),
-                stats.get('kurtosis', np.nan),
-                stats['reason'],
-            )
-            # --- seleção do scaler -----------------------------------
-            if self.strategy == 'auto':
-                scaler, stats = self._choose_auto(X_df[col], stats_callback=stats_callback)
-            elif self.strategy == 'standard':
-                scaler = StandardScaler()
-                stats  = dict(reason='global-standard', scaler='StandardScaler')
-            elif self.strategy == 'robust':
-                scaler = RobustScaler()
-                stats  = dict(reason='global-robust', scaler='RobustScaler')
-            elif self.strategy == 'minmax':
-                scaler = MinMaxScaler()
-                stats  = dict(reason='global-minmax', scaler='MinMaxScaler')
-            elif self.strategy == 'quantile':
-                scaler = QuantileTransformer(output_distribution='normal',
-                                             random_state=self.random_state)
-                stats  = dict(reason='global-quantile', scaler='QuantileTransformer')
-            else:              # None
                 scaler = None
-                stats  = dict(reason='passthrough', scaler='None')
-
-            # --- tratamento de missing values -----------------------
-            fill_value = None
-            if self.missing_strategy == 'median':
-                fill_value = X_df[col].median()
-            elif self.missing_strategy == 'mean':
-                fill_value = X_df[col].mean()
-            elif self.missing_strategy == 'constant':
-                fill_value = 0
-            if fill_value is not None:
-                X_df[col] = X_df[col].fillna(fill_value)
-                stats['fill_value'] = fill_value
-
-            # --- ajuste ---------------------------------------------
-            if scaler is not None:
-                scaler.fit(X_df[[col]])
-                if isinstance(scaler, PowerTransformer):
-                    transformed = scaler.transform(X_df[[col]])
-                    post_sk = skew(transformed.ravel(), nan_policy="omit")
-                    post_kt = kurtosis(transformed.ravel(), nan_policy="omit")
-                    stats['post_skew'] = post_sk
-                    stats['post_kurtosis'] = post_kt
-                    self.stats_[col] = {
-                        'pre_skew': stats.get('skew'),
-                        'pre_kurt': stats.get('kurtosis'),
-                        'post_skew': post_sk,
-                        'post_kurt': post_kt,
-                    }
+                report = {'chosen_scaler': 'None', 'reason': 'passthrough'}
 
             self.scalers_[col] = scaler
-            self.report_[col]  = stats
-
-            # --- log -------------------------------------------------
-            self.logger.info(
-                "Coluna '%s' → %s (p=%.3f, skew=%.2f, kurt=%.1f) | motivo: %s",
-                col, stats.get('scaler'),
-                stats.get('p_value', np.nan),
-                stats.get('skew',     np.nan),
-                stats.get('kurtosis', np.nan),
-                stats['reason']
-            )
+            self.report_[col] = report
 
         self.feature_names_in_ = np.array(list(self.scalers_.keys()))
         self.n_features_in_ = len(self.feature_names_in_)
         self.columns_hash_ = hashlib.md5(",".join(self.scalers_).encode()).hexdigest()
 
-        # serialização opcional
         if self.serialize:
             self.save(self.save_path)
 
