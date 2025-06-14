@@ -26,7 +26,7 @@ from sklearn.preprocessing import (
     PowerTransformer,
 )
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 
 class DynamicScaler(BaseEstimator, TransformerMixin):
@@ -262,6 +262,16 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
                 "ignored": list(self.ignore_scalers),
                 "candidates_tried": tried,
             }
+            reason_parts = ["stats"]
+            if abs(skew_test) < abs(baseline_score):
+                reason_parts.append("skew")
+            if abs(kurt_test) < abs(baseline_kurt) and abs(kurt_test) <= self.kurtosis_thr:
+                reason_parts.append("kurt")
+            if normal:
+                reason_parts.append("normal")
+            if need_imp:
+                reason_parts.append("imp")
+            report["reason"] = "|".join(reason_parts)
             if stats_callback:
                 stats_callback(x.name, report)
             return scaler, report
