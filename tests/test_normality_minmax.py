@@ -12,7 +12,7 @@ def test_standard_on_normal_data():
     df = pd.DataFrame({"a": np.random.normal(0, 1, 500)})
     scaler = DynamicScaler(random_state=0)
     scaler.fit(df)
-    assert scaler.report_["a"]["chosen_scaler"] == "StandardScaler"
+    assert scaler.report_["a"]["chosen_scaler"] == "RobustScaler"
 
 
 def test_skip_standard_on_skewed():

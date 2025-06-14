@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0
+- Validação secundária via curtose e etapa opcional de cross-validation.
+- `MinMaxScaler` apenas se `allow_minmax=True` e sujeito à CV.
+- Novos parâmetros `extra_validation`, `allow_minmax`, `kurtosis_thr` e `cv_gain_thr`.
+- Serialização salva apenas scalers efetivamente selecionados.
+- Documentação atualizada com fluxograma da nova validação.
+
 ## 0.3.0
 - Refatoração do `DynamicScaler` com validação pós-transform.
 - Suporte a `ignore_scalers` e lista de fallback curta.
