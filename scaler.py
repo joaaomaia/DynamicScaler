@@ -26,7 +26,7 @@ from sklearn.preprocessing import (
     PowerTransformer,
 )
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 
 class DynamicScaler(BaseEstimator, TransformerMixin):
@@ -95,6 +95,9 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         allow_minmax: bool = True,
         kurtosis_thr: float = 10.0,
         cv_gain_thr: float = 0.002,
+        *,
+        importance_metric: str | Callable = "shap",
+        importance_gain_thr: float = 0.10,
     ):
         self.strategy = strategy.lower() if strategy else None
         self.serialize = serialize
@@ -124,6 +127,15 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         self.allow_minmax = allow_minmax
         self.kurtosis_thr = kurtosis_thr
         self.cv_gain_thr = cv_gain_thr
+        self.importance_metric = importance_metric
+        self.importance_gain_thr = importance_gain_thr
+
+        if cv_gain_thr != 0.002 and importance_metric == "shap" and importance_gain_thr == 0.10:
+            import warnings
+            warnings.warn(
+                "cv_gain_thr está depreciado; use importance_gain_thr", DeprecationWarning
+            )
+            self.importance_gain_thr = cv_gain_thr
 
         self.scalers_: dict[str, BaseEstimator] | None = None
         self.report_: dict[str, dict] = {}  # estatísticas por coluna
@@ -164,7 +176,7 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         train = sample.drop(index=val.index)
         baseline_score = self.scoring(None, val.values)
         baseline_kurt = float(kurtosis(val.values, nan_policy="omit"))
-        baseline_cv: float | None = None
+        baseline_imp: float | None = None
 
         # --------------------------------------------------------------
         # Teste de normalidade (Shapiro-Wilk)
@@ -207,7 +219,7 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
             tried.append(name)
             scaler.fit(train.values.reshape(-1, 1))
             tr = scaler.transform(train.values.reshape(-1, 1)).ravel()
-            cand_cv = float("nan")
+            cand_imp = float("nan")
             post_std = float(np.std(tr))
             post_iqr = float(np.percentile(tr, 75) - np.percentile(tr, 25))
             post_n_unique = int(len(np.unique(tr)))
@@ -224,15 +236,17 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
             kurt_test = float(kurtosis(val_tr, nan_policy="omit"))
             if abs(kurt_test) >= abs(baseline_kurt) or abs(kurt_test) > self.kurtosis_thr:
                 continue
-            need_cv = self.extra_validation or name == "MinMaxScaler"
-            if need_cv:
+            need_imp = self.extra_validation or name == "MinMaxScaler"
+            if need_imp:
                 if y is None:
                     continue
                 y_train = y.loc[train.index]
-                if baseline_cv is None:
-                    baseline_cv = self._cv_score(train.values.reshape(-1, 1), y_train)
-                cand_cv = self._cv_score(tr.reshape(-1, 1), y_train)
-                if cand_cv < baseline_cv + self.cv_gain_thr:
+                if baseline_imp is None:
+                    baseline_model = self._fit_xgb(train.values.reshape(-1, 1), y_train)
+                    baseline_imp = self._feature_importance(baseline_model, train.values.reshape(-1, 1))
+                cand_model = self._fit_xgb(tr.reshape(-1, 1), y_train)
+                cand_imp = self._feature_importance(cand_model, tr.reshape(-1, 1))
+                if cand_imp < baseline_imp * (1 + self.importance_gain_thr):
                     continue
             report = {
                 "chosen_scaler": name,
@@ -242,7 +256,8 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
                     "post_n_unique": post_n_unique,
                     "skew_test": skew_test,
                     "kurtosis_test": kurt_test,
-                    "cv_score": float(cand_cv) if need_cv else float("nan"),
+                    "importance_base": float(baseline_imp) if need_imp else float("nan"),
+                    "importance_cand": float(cand_imp) if need_imp else float("nan"),
                 },
                 "ignored": list(self.ignore_scalers),
                 "candidates_tried": tried,
@@ -259,7 +274,8 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
                 "post_n_unique": 0,
                 "skew_test": float(baseline_score),
                 "kurtosis_test": float(baseline_kurt),
-                "cv_score": float(baseline_cv) if baseline_cv is not None else float("nan"),
+                "importance_base": float(baseline_imp) if baseline_imp is not None else float("nan"),
+                "importance_cand": float("nan"),
             },
             "ignored": list(self.ignore_scalers),
             "candidates_tried": tried,
@@ -542,6 +558,54 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
             n_jobs=self.n_jobs,
         )
         return float(scores.mean())
+
+    def _fit_xgb(self, X_arr: np.ndarray, y_arr: pd.Series):
+        """Ajusta um modelo XGBoost para cálculo de importância."""
+        import numpy as np
+        import xgboost as xgb
+
+        is_classif = y_arr.dtype.kind in {"i", "u", "b"} and np.unique(y_arr).size <= 20
+        if is_classif:
+            if np.unique(y_arr).size == 2:
+                event_rate = float(np.mean(y_arr == 1))
+                scale_pos_weight = (1 - event_rate) / event_rate if event_rate < 0.30 else 1.0
+            else:
+                scale_pos_weight = 1.0
+            model = xgb.XGBClassifier(
+                random_state=self.random_state,
+                n_estimators=150,
+                max_depth=4,
+                learning_rate=0.1,
+                eval_metric="logloss",
+                scale_pos_weight=scale_pos_weight,
+                n_jobs=self.n_jobs,
+            )
+        else:
+            model = xgb.XGBRegressor(
+                random_state=self.random_state,
+                n_estimators=150,
+                max_depth=4,
+                learning_rate=0.1,
+                n_jobs=self.n_jobs,
+            )
+
+        model.fit(X_arr, y_arr)
+        return model
+
+    def _feature_importance(self, model, X_arr: np.ndarray) -> float:
+        """Calcula importância de feature via SHAP, gain ou callable custom."""
+        if self.importance_metric == "shap":
+            import shap
+            import numpy as np
+
+            explainer = shap.TreeExplainer(model)
+            shap_vals = explainer.shap_values(X_arr)
+            return float(np.abs(shap_vals).mean())
+        elif self.importance_metric == "gain":
+            scores = model.get_booster().get_score(importance_type="gain")
+            return float(scores.get("f0", 0.0))
+        else:
+            return float(self.importance_metric(model, X_arr))
 
 
     def plot_histograms(

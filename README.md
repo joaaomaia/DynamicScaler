@@ -14,7 +14,7 @@ Ele combina testes estatísticos (normalidade, skew, curtose) com *optional* **v
 | **Fila inteligente** | `PowerTransformer → QuantileTransformer → RobustScaler → MinMaxScaler*` (*somente se `allow_minmax=True`). |
 | **Validação estatística** | Checa pós‑transformação: desvio‑padrão, IQR e nº de valores únicos. |
 | **Teste secundário** | Compara **kurtosis** à linha de base e a `kurtosis_thr`. |
-| **Validação cruzada** | Se `extra_validation=True` *ou* para `MinMaxScaler`, roda CV com XGBoost e exige ganho ≥ `cv_gain_thr`. |
+| **Validação de importância** | Se `extra_validation=True` *ou* para `MinMaxScaler`, avalia ganho de importância via `importance_metric` e exige aumento ≥ `importance_gain_thr`. |
 | **Auditável** | `report_as_df()` mostra métricas, candidatos testados, motivo de rejeição. |
 | **Visual** | `plot_histograms()` compara distribuições antes/depois e exibe o scaler usado. |
 | **Serialização segura** | Só salva scalers aprovados; usa hash de colunas para evitar mismatch em produção. |
@@ -43,14 +43,15 @@ print(scaler.report_as_df().head())
 scaler.plot_histograms(df, df_scaled, features=['idade', 'renda_mensal'])
 ```
 
-### Exemplo avançado com validação cruzada
+### Exemplo avançado com validação de importância
 
 ```python
 scaler_cv = DynamicScaler(
     strategy="auto",
-    extra_validation=True,    # habilita CV para todos
+    extra_validation=True,    # habilita validação para todos
     allow_minmax=True,        # deixa MinMax entrar
-    cv_gain_thr=0.003,        # exige ganho de 0.3 p.p. de AUC
+    importance_gain_thr=0.10, # exige aumento de 10% de importância
+    importance_metric="shap",
     random_state=42
 )
 
@@ -79,11 +80,11 @@ flowchart TD
     ValidaSkew -- não_melhora --> Loop
     ValidaSkew -- melhora --> ValidaKurt
     ValidaKurt -- falha --> Loop
-    ValidaKurt -- passa --> CheckCV
-    CheckCV -- necessidade_cv=true --> ValidaCV
-    CheckCV -- necessidade_cv=false --> Escolhido
-    ValidaCV -- ganho>=thr --> Escolhido
-    ValidaCV -- ganho<thr --> Loop
+    ValidaKurt -- passa --> CheckImp
+    CheckImp -- necessidade_imp=true --> ValidaImp
+    CheckImp -- necessidade_imp=false --> Escolhido
+    ValidaImp -- ganho>=thr --> Escolhido
+    ValidaImp -- ganho<thr --> Loop
     Loop -- fila_vazia --> SemScaler
     Escolhido --> Salva
     SemScaler --> Salva
@@ -98,9 +99,9 @@ flowchart TD
     B -- não --> Rejeita
     B -- sim --> C{Kurtosis adequada?}
     C -- não --> Rejeita
-    C -- sim --> D{CV habilitada?}
+    C -- sim --> D{Importância habilitada?}
     D -- não --> Aceita
-    D -- sim --> E{Ganho ≥ cv_gain_thr?}
+    D -- sim --> E{Ganho ≥ importance_gain_thr?}
     E -- sim --> Aceita
     E -- não --> Rejeita
 ```
@@ -130,7 +131,9 @@ flowchart TD
 | `kurtosis_thr` | `10.0` | Limite absoluto de curtose pós‑transformação. |
 | `extra_validation` | `False` | Habilita CV preditiva para **todos** os candidatos. |
 | `allow_minmax` | `True` | Permite que `MinMaxScaler` entre na fila. |
-| `cv_gain_thr` | `0.002` | Ganho mínimo de score em CV para aceitar scaler. |
+| `importance_metric` | `'shap'` | Métrica de importância: `'shap'`, `'gain'` ou função custom. |
+| `importance_gain_thr` | `0.10` | Aumento relativo mínimo na importância da feature. |
+| `cv_gain_thr` | `0.002` | (deprecated) mapeado para `importance_gain_thr`. |
 | `ignore_scalers` | `[]` | Lista de scalers a serem ignorados de antemão. |
 
 *(veja `help(DynamicScaler)` para todos os parâmetros)*
