@@ -4,10 +4,8 @@
 Ele combina testes estatísticos (normalidade, skew, curtose) com *optional* **validação cruzada preditiva** para garantir que **só transforma quando há ganho real**.
 
 ---
-
 ## ✨ Principais Características
 
-| Recurso | Descrição |
 |---------|-----------|
 | **Estratégias** | `'auto'`, `'standard'`, `'robust'`, `'minmax'`, `'quantile'`, `None` (passthrough). |
 | **Teste de normalidade** | `StandardScaler` só é considerado se o p‑valor do Shapiro‑Wilk ≥ `shapiro_p_val`. |
@@ -15,11 +13,19 @@ Ele combina testes estatísticos (normalidade, skew, curtose) com *optional* **v
 | **Validação estatística** | Checa pós‑transformação: desvio‑padrão, IQR e nº de valores únicos. |
 | **Teste secundário** | Compara **kurtosis** à linha de base e a `kurtosis_thr`. |
 | **Validação de importância** | Se `extra_validation=True` *ou* para `MinMaxScaler`, avalia ganho de importância via `importance_metric` e exige aumento ≥ `importance_gain_thr`. |
+| **Avaliação preditiva** | `evaluation_mode` define se `LogisticRegression`, `Ridge` e `XGBoost` participam da validação. |
 | **Auditável** | `report_as_df()` mostra métricas, candidatos testados, motivo de rejeição. |
 | **Visual** | `plot_histograms()` compara distribuições antes/depois e exibe o scaler usado. |
 | **Serialização segura** | Só salva scalers aprovados; usa hash de colunas para evitar mismatch em produção. |
 
 ---
+### Estratégia Auto
+No modo `auto`, o DynamicScaler monta uma fila de candidatos baseada na normalidade dos dados. Cada scaler é testado em sequência e só é aceito se:
+1. Desvio-padrão, IQR e nº de valores únicos pós-transformação superam `min_post_*`.
+2. O skew diminui em relação ao baseline.
+3. A curtose não piora e fica abaixo de `kurtosis_thr`.
+4. Se exigido, o ganho de importância medido via `evaluation_mode` é ≥ `importance_gain_thr`.
+Se todos falharem, a coluna segue sem transformação.
 
 ## 🚀 Exemplo Rápido
 
@@ -52,12 +58,13 @@ scaler_cv = DynamicScaler(
     allow_minmax=True,        # deixa MinMax entrar
     importance_gain_thr=0.10, # exige aumento de 10% de importância
     importance_metric="shap",
-    evaluation_mode="linear", # usa modelos lineares
+    evaluation_mode="both", # usa média de modelos lineares e não lineares
     random_state=42
 )
 
 scaler_cv.fit(df_train[num_cols], y_train)
 X_test_scaled = scaler_cv.transform(df_test[num_cols], return_df=True)
+print(scaler_cv.report_as_df().tail())
 ```
 
 > ⚠ **Tip**
@@ -65,6 +72,7 @@ X_test_scaled = scaler_cv.transform(df_test[num_cols], return_df=True)
 > `DynamicScaler` usa `shap.LinearExplainer` automaticamente para obter
 > importâncias consistentes. Se preferir, defina `importance_metric="gain"`
 > ou `"coef"`.
+> ℹ️ **partial_fit**: `StandardScaler`, `RobustScaler` e `MinMaxScaler` permitem atualização incremental. Para os demais, a chamada é ignorada.
 
 ---
 
@@ -76,22 +84,23 @@ flowchart TD
     VerificaIgnorados -- ignorado --> Fim
     VerificaIgnorados -- ok --> TestaNormalidade
     TestaNormalidade -- normal --> EnfileiraStandard
-    TestaNormalidade -- não_normal --> IgnoraStandard
-    EnfileiraStandard --> Fila
-    IgnoraStandard --> Fila
-    Fila --> Loop
+    TestaNormalidade -- nao_normal --> IgnoraStandard
+    EnfileiraStandard --> MontaFila
+    IgnoraStandard --> MontaFila
+    MontaFila --> Baseline
+    Baseline --> Loop
     Loop --> Candidato
-    Candidato --> ValidaStats
-    ValidaStats -- falha --> Loop
-    ValidaStats -- passa --> ValidaSkew
-    ValidaSkew -- não_melhora --> Loop
-    ValidaSkew -- melhora --> ValidaKurt
-    ValidaKurt -- falha --> Loop
-    ValidaKurt -- passa --> CheckImp
-    CheckImp -- necessidade_imp=true --> ValidaImp
-    CheckImp -- necessidade_imp=false --> Escolhido
-    ValidaImp -- ganho>=thr --> Escolhido
-    ValidaImp -- ganho<thr --> Loop
+    Candidato --> ChecaStats{std/IQR/unicos}
+    ChecaStats -- falha --> Loop
+    ChecaStats -- ok --> SkewCmp
+    SkewCmp -- piora --> Loop
+    SkewCmp -- melhora --> KurtCmp{Kurt<=thr?}
+    KurtCmp -- nao --> Loop
+    KurtCmp -- sim --> ImpCheck{Precisa imp?}
+    ImpCheck -- nao --> Escolhido
+    ImpCheck -- sim --> ValidaImp{Ganho>=thr}
+    ValidaImp -- nao --> Loop
+    ValidaImp -- sim --> Escolhido
     Loop -- fila_vazia --> SemScaler
     Escolhido --> Salva
     SemScaler --> Salva
@@ -102,15 +111,17 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A[Novo Scaler] --> B{Skew reduzido?}
-    B -- não --> Rejeita
-    B -- sim --> C{Kurtosis adequada?}
-    C -- não --> Rejeita
-    C -- sim --> D{Importância habilitada?}
-    D -- não --> Aceita
-    D -- sim --> E{Ganho ≥ importance_gain_thr?}
-    E -- sim --> Aceita
-    E -- não --> Rejeita
+    A[Novo Scaler] --> B{std/IQR/unicos ok?}
+    B -- nao --> Rejeita
+    B -- sim --> C{Skew < baseline?}
+    C -- nao --> Rejeita
+    C -- sim --> D{Kurt <= thr?}
+    D -- nao --> Rejeita
+    D -- sim --> E{Importancia habilitada?}
+    E -- nao --> Aceita
+    E -- sim --> F{Ganho >= thr?}
+    F -- sim --> Aceita
+    F -- nao --> Rejeita
 ```
 
 ---
@@ -150,9 +161,10 @@ flowchart TD
 | `allow_minmax` | `True` | Permite que `MinMaxScaler` entre na fila. |
 | `importance_metric` | `'shap'` | Métrica de importância: `'shap'`, `'gain'` ou função custom. |
 | `importance_gain_thr` | `0.10` | Aumento relativo mínimo na importância da feature. |
-| `evaluation_mode` | `'nonlinear'` | `'linear'`, `'nonlinear'` ou `'both'` para escolher o(s) modelo(s) de validação. |
+| `evaluation_mode` | `nonlinear` | Escolhe modelos para validacao: `LogisticRegression`/`Ridge` para "linear", `XGBoost` para "nonlinear" ou ambos. |
 | `cv_gain_thr` | `0.002` | (deprecated) mapeado para `importance_gain_thr`. |
 | `ignore_scalers` | `[]` | Lista de scalers a serem ignorados de antemão. |
+| `extra_scalers` | `[]` | Lista adicional de scalers (instâncias) testados após os padrões. |
 
 *(veja `help(DynamicScaler)` para todos os parâmetros)*
 
