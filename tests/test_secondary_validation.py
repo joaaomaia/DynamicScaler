@@ -13,13 +13,17 @@ def test_minmax_requires_cv_gain(monkeypatch):
     df = pd.DataFrame({"a": np.linspace(0, 10, 200)})
     y = (df["a"] > 5).astype(int)
 
-    def fake_cv(self, X, y_):
-        return 0.65 if X.max() <= 1 else 0.6
+    def fake_fit(self, X, y_):
+        return None
+
+    def fake_imp(self, model, X):
+        return 0.8 if X.max() <= 1 else 0.6
 
     def fake_kurt(arr, **_):
         return 0 if arr.max() <= 1 else 10
 
-    monkeypatch.setattr(DynamicScaler, "_cv_score", fake_cv)
+    monkeypatch.setattr(DynamicScaler, "_fit_xgb", fake_fit)
+    monkeypatch.setattr(DynamicScaler, "_feature_importance", fake_imp)
     monkeypatch.setattr("scaler.kurtosis", fake_kurt)
     scaler = DynamicScaler(
         ignore_scalers=["PowerTransformer", "QuantileTransformer", "RobustScaler"],
@@ -34,10 +38,15 @@ def test_cv_xgboost_enabled_by_flag(monkeypatch):
     df = pd.DataFrame({"a": np.random.lognormal(size=200)})
     y = (df["a"] > 1).astype(int)
 
-    def fake_cv(self, X, y_):
+    def fake_fit(self, X, y_):
+        return None
+
+    def fake_imp(self, model, X):
         return 0.8 if X.max() > 1 else 0.805
 
-    monkeypatch.setattr(DynamicScaler, "_cv_score", fake_cv)
+    monkeypatch.setattr(DynamicScaler, "_fit_xgb", fake_fit)
+    monkeypatch.setattr(DynamicScaler, "_feature_importance", fake_imp)
+    monkeypatch.setattr("scaler.kurtosis", lambda arr, **_: 0)
     scaler = DynamicScaler(
         extra_validation=True,
         cv_gain_thr=0.01,

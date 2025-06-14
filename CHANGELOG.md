@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.0
+- Validação de importância via SHAP/gain substitui ganho de CV.
+- Novos parâmetros `importance_metric` e `importance_gain_thr`.
+- `cv_gain_thr` depreciado, mapeado para `importance_gain_thr`.
+- Documentação e fluxograma atualizados.
+
 ## 0.4.0
 - Validação secundária via curtose e etapa opcional de cross-validation.
 - `MinMaxScaler` apenas se `allow_minmax=True` e sujeito à CV.
