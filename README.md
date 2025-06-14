@@ -14,6 +14,8 @@ Selecione e aplique dinamicamente o scaler mais adequado para cada feature numé
 - Ao plotar histogramas, se a coluna não for escalonada o título exibe "Nenhum".
 - **Validação rápida** com amostra holdout e fallback entre scalers.
 - **`ignore_scalers`** para pular transformadores indesejados.
+- **StandardScaler** só é considerado se o teste de Shapiro-Wilk indicar normalidade.
+- **MinMaxScaler** entra na fila como último recurso.
 
 ---
 
@@ -84,6 +86,8 @@ df_scaled = scaler.transform(df_full, return_df=True)
 |----------------|-------------------------------------------------------------------|---------------------------------------------------------------------------|
 | `strategy`     | `{'auto', 'standard', 'robust', 'minmax', 'quantile', None}`      | Estratégia de escalonamento (default: `'auto'`).                          |
 | `shapiro_p_val`| `float`                                                           | Valor-p mínimo do teste de Shapiro para considerar normalidade (default: `0.01`). |
+| `shapiro_n`    | `int`
+     | Tamanho da amostra usada no teste de Shapiro (default: `5000`). |
 | `serialize`    | `bool`                                                            | Se `True`, salva automaticamente scalers e relatório em `save_path` após o `fit`. |
 | `save_path`    | `str` \| `Path`                                                   | Caminho para o arquivo `.pkl` de serialização (default: `'scalers.pkl'`). |
 | `random_state` | `int`                                                             | Semente para amostragem e `QuantileTransformer` (default: `0`).           |
