@@ -580,9 +580,17 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
     # SERIALIZAÇÃO
     # ------------------------------------------------------------------
     def save(self, path: str | pathlib.Path | None = None):
-        """Serializa scalers + relatório + metadados."""
         path = pathlib.Path(path or self.save_path)
-        scalers_to_save = {c: self.scalers_[c] for c in getattr(self, "selected_cols_", self.scalers_)}
+
+        # apenas scalers efetivamente utilizados
+        scalers_to_save = {
+            c: self.scalers_[c] for c in getattr(self, "selected_cols_", self.scalers_)
+        }
+
+        # --- NOVO: recalcula o hash com base nas colunas salvas ---
+        keys_str = ",".join(scalers_to_save)
+        hash_now = hashlib.md5(keys_str.encode()).hexdigest()
+
         joblib.dump(
             {
                 "scalers": scalers_to_save,
@@ -590,12 +598,13 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
                 "strategy": self.strategy,
                 "random_state": self.random_state,
                 "library_version": sklearn.__version__,
-                "columns_hash": self.columns_hash_,
+                "columns_hash": hash_now,          # grava hash novo
             },
             path,
             compress=("gzip", 3),
         )
         self.logger.info("Scalers salvos em %s", path)
+
 
     def load(self, path: str | pathlib.Path):
         """Restaura scalers + relatório + metadados já treinados."""
