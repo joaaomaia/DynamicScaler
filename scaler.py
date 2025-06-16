@@ -17,6 +17,8 @@ import sklearn
 from sklearn.utils.validation import check_is_fitted
 from typing import Callable
 
+from sklearn.model_selection import StratifiedKFold, cross_validate
+
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.preprocessing import (
     StandardScaler,
@@ -390,6 +392,12 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
 
         if self.serialize:
             self.save(self.save_path)
+
+        # --------------------------------------------------
+        # MEMÓRIA PARA MÉTODOS DE INSPEÇÃO POSTERIORES
+        # --------------------------------------------------
+        self._X_fit_original_ = X_df.copy()        # ← NEW
+        self._y_fit_ = y_series                     # ← NEW
 
         return self
 
@@ -808,3 +816,232 @@ class DynamicScaler(BaseEstimator, TransformerMixin):
         self.selected_cols_ = [c for c, r in self.report_.items() if r.get("chosen_scaler") != "None"]
         self.logger.info("Scalers carregados de %s", path)
         return self
+
+
+    def plot_information_gain_logreg(
+        self,
+        *,
+        only_scaled: bool = True,
+        gain_thr: float | None = None,
+        top_n: int | None = None,
+        n_jobs: int | None = None,
+        show_if_empty: bool = True,
+        color_before: str = "#9E9E9E",   # cinza ‑ antes
+        color_after: str = "#FF5500",   # laranja ‑ depois
+        height_px: int | None = None,
+        title: str | None = None,          # \u2190 novo parâmetro
+    ):
+        """Plot (Plotly) do ganho de informação pós‑DynamicScaler usando
+        Regressão Logística univariada + *sample_weight* balanceado.
+
+        Parâmetros principais
+        --------------------
+        title : str | None
+            Título exibido no gráfico.  Se ``None`` usa o texto‑padrão
+            "DynamicScaler – Impacto no Ganho de Informação (LogReg)".
+        ... (demais descrições permanecem iguais) ...
+        """
+        import numpy as np
+        import pandas as pd
+        import plotly.graph_objects as go
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.metrics import roc_auc_score
+        from sklearn.model_selection import StratifiedKFold
+        from sklearn.utils.class_weight import compute_sample_weight
+        from sklearn.utils.validation import check_is_fitted
+        from joblib import Parallel, delayed
+        from sklearn.base import clone
+
+        # -------- sanity checks ---------
+        check_is_fitted(self, "scalers_")
+        if not hasattr(self, "_X_fit_original_") or not hasattr(self, "_y_fit_"):
+            raise RuntimeError("Use 'fit(X, y)' antes de chamar o gráfico.")
+
+        X_df = self._X_fit_original_
+        y_series = self._y_fit_
+
+        # numpy arrays para indexação posicional segura
+        y_arr = np.asarray(y_series)
+        sw_full = np.asarray(compute_sample_weight("balanced", y_arr))
+
+        X_scaled_df = self.transform(X_df, return_df=True, keep_other_cols=True)
+
+        gain_thr = self.importance_gain_thr if gain_thr is None else gain_thr
+        cols = self.selected_cols_ if only_scaled else list(self.scalers_)
+        n_jobs = self.n_jobs if n_jobs is None else n_jobs
+
+        cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=self.random_state)
+        base_lr = LogisticRegression(
+            penalty="l2",
+            solver="liblinear",
+            max_iter=1000,
+            n_jobs=1,  # cada tarefa paralela usa single‑thread
+            random_state=self.random_state,
+        )
+
+        # --------------------------------------------------
+        # função auxiliar: devolve (auc_before, auc_after) para 1 feature
+        # --------------------------------------------------
+        def _auc_for_col(col_name: str, X_arr: np.ndarray, X_arr_scaled: np.ndarray):
+            before_scores, after_scores = [], []
+            for train_idx, test_idx in cv.split(X_arr, y_arr):
+                sw_train = sw_full[train_idx]
+
+                # ----- Antes (raw)
+                lr_b = clone(base_lr)
+                lr_b.fit(X_arr[train_idx], y_arr[train_idx], sample_weight=sw_train)
+                prob_b = lr_b.predict_proba(X_arr[test_idx])[:, 1]
+                before_scores.append(
+                    roc_auc_score(y_arr[test_idx], prob_b, sample_weight=sw_full[test_idx])
+                )
+
+                # ----- Depois (scaled)
+                lr_a = clone(base_lr)
+                lr_a.fit(X_arr_scaled[train_idx], y_arr[train_idx], sample_weight=sw_train)
+                prob_a = lr_a.predict_proba(X_arr_scaled[test_idx])[:, 1]
+                after_scores.append(
+                    roc_auc_score(y_arr[test_idx], prob_a, sample_weight=sw_full[test_idx])
+                )
+            return float(np.mean(before_scores)), float(np.mean(after_scores))
+
+        # --------------------------------------------------
+        # Loop pelas colunas (paralelo)
+        # --------------------------------------------------
+        results = Parallel(n_jobs=n_jobs)(
+            delayed(_auc_for_col)(
+                col,
+                X_df[[col]].values,      # original
+                X_scaled_df[[col]].values,  # escalonado
+            )
+            for col in cols
+        )
+
+        # montagem do DataFrame de resultados
+        rows = []
+        for col, (auc_b, auc_a) in zip(cols, results):
+            gain_rel = (auc_a - auc_b) / (abs(auc_b) + 1e-12)
+            rows.append({"feature": col, "auc_before": auc_b, "auc_after": auc_a, "gain": gain_rel})
+
+        df = pd.DataFrame(rows)
+        passed = df[df["gain"] >= gain_thr].copy()
+        if passed.empty and show_if_empty:
+            passed = df.sort_values("gain", ascending=False).head(top_n or len(df))
+        elif top_n:
+            passed = passed.head(top_n)
+
+        # guarda para exportação posterior
+        self.info_gain_df_ = passed
+
+        if passed.empty:
+            print("Nenhuma feature para exibir – verifique gain_thr/top_n.")
+            return passed
+
+        # --------- Plotly -------------
+        xmin = float(passed[["auc_before", "auc_after"]].min().min()) * 0.95
+        xmax = float(passed[["auc_before", "auc_after"]].max().max()) * 1.05
+
+        y_labels = passed["feature"][::-1]
+        auc_before = passed["auc_before"][::-1]
+        auc_after = passed["auc_after"][::-1]
+        gains_pct = (passed["gain"] * 100).round(2)[::-1]
+
+        fig = go.Figure()
+        bar_h = 0.35
+        fig.add_trace(
+            go.Bar(
+                x=auc_before,
+                y=y_labels,
+                name="Importância Antes",
+                orientation="h",
+                marker_color=color_before,
+                width=bar_h,
+                offset=-bar_h / 2,
+                hovertemplate="Antes: %{x:.4f}<extra></extra>",
+            )
+        )
+        fig.add_trace(
+            go.Bar(
+                x=auc_after,
+                y=y_labels,
+                name="Importância Depois",
+                orientation="h",
+                marker_color=color_after,
+                width=bar_h,
+                offset=bar_h / 2,
+                customdata=gains_pct,
+                hovertemplate="Depois: %{x:.4f}<br>Ganho: %{customdata:+.2f}%<extra></extra>",
+            )
+        )
+
+        for y_lab, x_val, g in zip(y_labels, auc_after, gains_pct):
+            fig.add_annotation(
+                x=x_val,
+                y=y_lab,
+                text=f"+{g}%",
+                showarrow=False,
+                xanchor="left",
+                yanchor="middle",
+                font=dict(size=11, color=color_after),
+                xshift=6,
+            )
+
+        total_rows = len(passed)
+        fig_h = height_px or max(400, 50 * total_rows)
+
+        default_title = "DynamicScaler – Impacto no Ganho de Informação (LogReg)"
+        fig.update_layout(
+            title=title or default_title,
+            xaxis=dict(title="AUC (3-fold CV, sample_weight)", range=[xmin, xmax], tickformat=".3f"),
+            yaxis=dict(autorange="reversed"),
+            barmode="group",
+            bargap=0.25,
+            template="simple_white",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            height=fig_h,
+            margin=dict(l=110, r=40, t=80, b=40),
+        )
+
+        fig.show(renderer="notebook_connected")
+        return passed
+
+
+
+
+        # # ---------------- PLOT -----------------
+        # if passed.empty:
+        #     print("Nenhuma feature atingiu o ganho mínimo e show_if_empty=False – nada a plotar.")
+        #     return passed
+
+        # plt.figure(figsize=figsize)
+
+        # y_pos = np.arange(len(passed))
+        # bar_h = 0.35                         # altura de cada barra
+        # offset = bar_h / 2
+
+        # # barras "Antes"
+        # plt.barh(
+        #     y_pos - offset,
+        #     passed["auc_before"],
+        #     height=bar_h,
+        #     label="Importância Antes",
+        #     **bar_kwargs_before,
+        # )
+
+        # # barras "Depois"
+        # plt.barh(
+        #     y_pos + offset,
+        #     passed["auc_after"],
+        #     height=bar_h,
+        #     label="Importância Depois",
+        #     **bar_kwargs_after,
+        # )
+
+        # plt.yticks(y_pos, passed["feature"])
+        # plt.gca().invert_yaxis()
+        # plt.xlabel("AUC (3-fold CV, sample_weight)")
+        # plt.title("DynamicScaler – Impacto no Ganho de Informação (LogReg)")
+        # plt.legend()
+        # plt.tight_layout()
+        # plt.show()
+
+
